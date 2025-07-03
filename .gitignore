@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -137,6 +138,40 @@ celerybeat.pid
 # Environments
 .env
 .envrc
+=======
+bin
+obj
+csx
+.vs
+edge
+Publish
+
+*.user
+*.suo
+*.cscfg
+*.Cache
+project.lock.json
+
+/packages
+/TestResults
+
+/tools/NuGet.exe
+/App_Data
+/secrets
+/data
+.secrets
+appsettings.json
+local.settings.json
+
+node_modules
+dist
+
+# Local python packages
+.python_packages/
+
+# Python Environments
+.env
+>>>>>>> 730f803 (Initial Azure Function HTTP scraper with DB save)
 .venv
 env/
 venv/
@@ -144,6 +179,7 @@ ENV/
 env.bak/
 venv.bak/
 
+<<<<<<< HEAD
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -205,3 +241,14 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+=======
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Azurite artifacts
+__blobstorage__
+__queuestorage__
+__azurite_db*__.json
+>>>>>>> 730f803 (Initial Azure Function HTTP scraper with DB save)
