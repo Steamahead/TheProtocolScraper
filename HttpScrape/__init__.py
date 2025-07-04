@@ -1,8 +1,11 @@
+import json
+from datetime import datetime
+from models import JobListing
+from database import insert_job_listing
 import logging
 import azure.functions as func
 import requests
 from bs4 import BeautifulSoup
-
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Processing scrape request...')
@@ -34,6 +37,39 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
     # 4. Parse title as a quick check
     soup = BeautifulSoup(resp.text, 'html.parser')
+
+    listings = []
+    jobs = soup.select('div.offer-card')  # adjust selector
+    for job in jobs:
+        title = job.select_one('h2.title').get_text(strip=True)
+        company = job.select_one('div.company').get_text(strip=True)
+        link = job.select_one('a.offer-link')['href']
+
+        listing = JobListing(
+            job_id=link,
+            source='theprotocol.it',
+            title=title,
+            company=company,
+            link=link,
+            salary_min=None,
+            salary_max=None,
+            location='',
+            operating_mode='',
+            work_type='',
+            experience_level='',
+            employment_type='',
+            years_of_experience=None,
+            scrape_date=datetime.utcnow(),
+            listing_status='Active'
+        )
+        insert_job_listing(listing)
+        listings.append({'title': title, 'company': company})
+
+    return func.HttpResponse(
+        body=json.dumps(listings, ensure_ascii=False),
+        status_code=200,
+        mimetype='application/json'
+    )
     title = soup.title.string if soup.title else 'No title found'
 
     # 5. Return result
