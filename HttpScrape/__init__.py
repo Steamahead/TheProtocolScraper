@@ -1,12 +1,19 @@
-# test
-import json
-from datetime import datetime
-from models import JobListing
-from database import insert_job_listing
 import logging
 import azure.functions as func
 import requests
 from bs4 import BeautifulSoup
+from models import JobListing  # Ensure models.py is at root
+from database import insert_job_listing  # Ensure database.py is at root
+import json
+from datetime import datetime
+
+headers = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/91.0.4472.124 Safari/537.36"
+    )
+}
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Processing scrape request...')
