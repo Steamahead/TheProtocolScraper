@@ -6,22 +6,18 @@ from datetime import datetime
 from scraper import fetch_listings
 from models import JobListing
 from database import insert_job_listing
-logging.info('Starting fetch_listings call')
-listings_data = fetch_listings()
-logging.info(f"Fetched {len(listings_data)} listings")
-logging.info(f"About to insert listing: {listing.title}")
-short_id = insert_job_listing(listing)
-logging.info(f"Inserted listing with ID: {short_id}")
 
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('HttpScrape function started')
 
     try:
+        logging.info('Calling fetch_listings()')
         listings_data = fetch_listings()
+        logging.info(f'Fetched {len(listings_data)} listings')
     except Exception as e:
-        logging.error(f"Error fetching listings: {e}")
-        return func.HttpResponse(f"Error: {e}", status_code=500)
+        logging.error(f'Error fetching listings: {e}')
+        return func.HttpResponse(f'Error fetching: {e}', status_code=500)
 
     results = []
     for data in listings_data:
@@ -31,20 +27,23 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             title=data['title'],
             company=data['company'],
             link=data['link'],
-            scrape_date=datetime.utcnow(),
+            scrape_date=datetime.utcnow()
         )
 
-        try:
-            short_id = insert_job_listing(listing)
-            listing.short_id = short_id
-            logging.info(f"Inserted listing {short_id}")
-        except Exception as db_err:
-            logging.error(f"DB error: {db_err}")
+        # -----------------------------
+        # DATABASE WRITE DISABLED FOR TESTING
+        # -----------------------------
+        # try:
+        #     short_id = insert_job_listing(listing)
+        #     listing.short_id = short_id
+        #     logging.info(f'Inserted listing with ID: {short_id}')
+        # except Exception as db_err:
+        #     logging.error(f'DB error: {db_err}')
 
         results.append({
             'title': listing.title,
             'company': listing.company,
-            'id': listing.short_id
+            'id': getattr(listing, 'short_id', None)
         })
 
     return func.HttpResponse(
