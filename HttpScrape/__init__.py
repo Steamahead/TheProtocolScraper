@@ -33,12 +33,12 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         )
 
         # Database write is disabled to isolate scraping errors
-        # try:
-        #     short_id = insert_job_listing(listing)
-        #     listing.short_id = short_id
-        #     logging.info(f'Inserted listing with ID: {short_id}')
-        # except Exception as db_err:
-        #     logging.error(f'DB error: {db_err}')
+        try:
+             short_id = insert_job_listing(listing)
+             listing.short_id = short_id
+             logging.info(f'Inserted listing with ID: {short_id}')
+        except Exception as db_err:
+             logging.error(f'DB error: {db_err}')
 
         results.append({
             'title': listing.title,
