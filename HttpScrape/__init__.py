@@ -5,12 +5,13 @@ from datetime import datetime
 
 from scraper import fetch_listings
 from models import JobListing
-from database import insert_job_listing
+# from database import insert_job_listing  # Disabled for testing
 
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('HttpScrape function started')
 
+    # 1. Fetch listings
     try:
         logging.info('Calling fetch_listings()')
         listings_data = fetch_listings()
@@ -19,6 +20,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         logging.error(f'Error fetching listings: {e}')
         return func.HttpResponse(f'Error fetching: {e}', status_code=500)
 
+    # 2. Build result list (DB writes commented out)
     results = []
     for data in listings_data:
         listing = JobListing(
@@ -30,9 +32,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             scrape_date=datetime.utcnow()
         )
 
-        # -----------------------------
-        # DATABASE WRITE DISABLED FOR TESTING
-        # -----------------------------
+        # Database write is disabled to isolate scraping errors
         # try:
         #     short_id = insert_job_listing(listing)
         #     listing.short_id = short_id
@@ -46,6 +46,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             'id': getattr(listing, 'short_id', None)
         })
 
+    # 3. Return JSON response
     return func.HttpResponse(
         body=json.dumps(results, ensure_ascii=False),
         status_code=200,
