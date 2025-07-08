@@ -6,6 +6,12 @@ from datetime import datetime
 from scraper import fetch_listings
 from models import JobListing
 from database import insert_job_listing
+logging.info('Starting fetch_listings call')
+listings_data = fetch_listings()
+logging.info(f"Fetched {len(listings_data)} listings")
+logging.info(f"About to insert listing: {listing.title}")
+short_id = insert_job_listing(listing)
+logging.info(f"Inserted listing with ID: {short_id}")
 
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
