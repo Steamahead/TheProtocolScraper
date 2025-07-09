@@ -1,10 +1,9 @@
-import pyodbc
+import pymssql
 from typing import Optional
 import os
 import logging
 from datetime import datetime
 from models import JobListing, Skill
-
 
 def _truncate(value: Optional[str], length: int) -> Optional[str]:
     """Helper to ensure string does not exceed the given length."""
@@ -15,16 +14,20 @@ def _truncate(value: Optional[str], length: int) -> Optional[str]:
 def get_sql_connection():
     """Get SQL connection using SQL authentication"""
     try:
-        # Import pymssql directly
-        import pymssql
-
         # Get connection details from environment variables
         server = os.environ.get('DB_SERVER')
         database = os.environ.get('DB_NAME')
         username = os.environ.get('DB_UID')
         password = os.environ.get('DB_PWD')
 
-        logging.info(f"Connecting to SQL server with SQL auth: {server}/{database} as {username}")
+        if not all([server, database, username, password]):
+            missing = [k for k, v in {
+                'DB_SERVER': server, 'DB_NAME': database, 
+                'DB_UID': username, 'DB_PWD': password
+            }.items() if not v]
+            raise Exception(f"Missing environment variables: {missing}")
+
+        logging.info(f"Connecting to SQL server: {server}/{database} as {username}")
 
         # Connect using pymssql with SQL authentication
         connection = pymssql.connect(
@@ -36,23 +39,19 @@ def get_sql_connection():
             appname="JobMinerApp"
         )
 
-        logging.info("SQL connection successful with SQL auth")
+        logging.info("SQL connection successful")
         return connection
     except Exception as e:
         logging.error(f"SQL connection error: {str(e)}")
         import traceback
         logging.error(traceback.format_exc())
-        return None
+        raise
 
 def create_tables_if_not_exist():
     """Create the database tables if they don't exist"""
     connection = None
     try:
         connection = get_sql_connection()
-        if not connection:
-            logging.error("Failed to establish database connection")
-            return False
-            
         cursor = connection.cursor()
         
         # Create Jobs table
@@ -68,11 +67,11 @@ def create_tables_if_not_exist():
                 Link NVARCHAR(500) NOT NULL,
                 SalaryMin INT NULL,
                 SalaryMax INT NULL,
-                Location NVARCHAR(255) NOT NULL,
-                OperatingMode NVARCHAR(255) NOT NULL,
-                WorkType NVARCHAR(50) NOT NULL,
-                ExperienceLevel NVARCHAR(MAX) NOT NULL,
-                EmploymentType NVARCHAR(50) NOT NULL,
+                Location NVARCHAR(255) NULL,
+                OperatingMode NVARCHAR(255) NULL,
+                WorkType NVARCHAR(50) NULL,
+                ExperienceLevel NVARCHAR(MAX) NULL,
+                EmploymentType NVARCHAR(50) NULL,
                 YearsOfExperience INT NULL,
                 ScrapeDate DATETIME NOT NULL,
                 ListingStatus NVARCHAR(20) NOT NULL,
@@ -91,7 +90,7 @@ def create_tables_if_not_exist():
                 ShortID INT NOT NULL,
                 Source NVARCHAR(50) NOT NULL,
                 SkillName NVARCHAR(150) NOT NULL,
-                SkillCategory NVARCHAR(50) NOT NULL,
+                SkillCategory NVARCHAR(50) NULL,
                 CONSTRAINT UC_JobSkill UNIQUE (JobID, Source, SkillName)
             )
         END
@@ -101,72 +100,87 @@ def create_tables_if_not_exist():
         cursor.execute(skills_table_sql)
         connection.commit()
         logging.info("Database tables created or already exist")
-        return True
         
     except Exception as e:
         logging.error(f"Error creating tables: {str(e)}")
-        import traceback
-        logging.error(traceback.format_exc())
-        return False
+        raise
     finally:
         if connection:
             connection.close()
+
+
 def insert_job_listing(job: JobListing) -> Optional[int]:
     """Insert a job listing into the database and return its ID"""
-    conn = get_sql_connection()
-    if not conn:
-        logging.error(f"DB connect failed for job {job.title}")
-        return None
-    cur = conn.cursor()
+    connection = None
+    cursor = None
+    
+    try:
+        connection = get_sql_connection()
+        cursor = connection.cursor()
 
-    # check for existing
-    cur.execute(
-        "SELECT ID FROM JobListings WHERE JobID=%s AND Source=%s",
-        (job.job_id, job.source)
-    )
-    row = cur.fetchone()
-    if row:
-        job.short_id = row[0]
-        return row[0]
+        # Check for existing
+        cursor.execute(
+            "SELECT ID FROM JobListings WHERE JobID=%s AND Source=%s",
+            (job.job_id, job.source)
+        )
+        row = cursor.fetchone()
+        if row:
+            job.short_id = row[0]
+            logging.info(f"Job already exists with ID: {row[0]}")
+            return row[0]
 
-    # insert new
-    # enforce column length limits
-    params = (
-        _truncate(job.job_id, 100),
-        _truncate(job.source, 50),
-        _truncate(job.title, 255),
-        _truncate(job.company, 255),
-        _truncate(job.link, 500),
-        job.salary_min,
-        job.salary_max,
-        _truncate(job.location, 255),
-        _truncate(job.operating_mode, 50),
-        _truncate(job.work_type, 50),
-        _truncate(job.experience_level, 50),
-        _truncate(job.employment_type, 50),
-        job.years_of_experience,
-        job.scrape_date,
-        _truncate(job.listing_status, 20),
-    )
-
-    cur.execute(
-        """
+        # Insert new
+        insert_sql = """
         INSERT INTO JobListings (
             JobID, Source, Title, Company, Link,
             SalaryMin, SalaryMax, Location,
             OperatingMode, WorkType, ExperienceLevel, EmploymentType,
             YearsOfExperience, ScrapeDate, ListingStatus
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);
-        SELECT SCOPE_IDENTITY();
-    """,
-        params,
-    )
-    new_id = int(cur.fetchone()[0])
-    conn.commit()
-    job.short_id = new_id
-    cur.close()
-    conn.close()
-    return new_id
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """
+        
+        params = (
+            _truncate(job.job_id, 100),
+            _truncate(job.source, 50),
+            _truncate(job.title, 255),
+            _truncate(job.company, 255),
+            _truncate(job.link, 500),
+            job.salary_min,
+            job.salary_max,
+            _truncate(job.location, 255) if job.location else None,
+            _truncate(job.operating_mode, 255) if job.operating_mode else None,
+            _truncate(job.work_type, 50) if job.work_type else None,
+            _truncate(job.experience_level, 100) if job.experience_level else None,
+            _truncate(job.employment_type, 50) if job.employment_type else None,
+            job.years_of_experience,
+            job.scrape_date,
+            _truncate(job.listing_status, 20),
+        )
+
+        cursor.execute(insert_sql, params)
+        
+        # Get the inserted ID
+        cursor.execute("SELECT @@IDENTITY")
+        new_id = int(cursor.fetchone()[0])
+        
+        connection.commit()
+        job.short_id = new_id
+        logging.info(f"Inserted new job with ID: {new_id}")
+        return new_id
+        
+    except Exception as e:
+        if connection:
+            connection.rollback()
+        logging.error(f"Error inserting job listing '{job.title}': {e}")
+        import traceback
+        logging.error(traceback.format_exc())
+        raise
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
+
 def insert_skill(skill: Skill) -> bool:
     """Insert a skill into the database"""
     connection = None
@@ -174,19 +188,15 @@ def insert_skill(skill: Skill) -> bool:
     
     try:
         connection = get_sql_connection()
-        if not connection:
-            logging.error(f"Failed to establish database connection for skill: {skill.skill_name}")
-            return False
-            
         cursor = connection.cursor()
         
         # Check if skill already exists for this job
         check_query = """
         SELECT ID, ShortID
-          FROM Skills
-         WHERE JobID = %s
-           AND Source = %s
-           AND SkillName = %s
+        FROM Skills
+        WHERE JobID = %s
+          AND Source = %s
+          AND SkillName = %s
         """
         cursor.execute(check_query, (skill.job_id, skill.source, skill.skill_name))
         existing = cursor.fetchone()
@@ -212,8 +222,8 @@ def insert_skill(skill: Skill) -> bool:
             _truncate(skill.job_id, 100),
             skill.short_id,
             _truncate(skill.source, 50),
-            _truncate(skill.skill_name, 100),
-            _truncate(skill.skill_category, 50)
+            _truncate(skill.skill_name, 150),
+            _truncate(skill.skill_category, 50) if skill.skill_category else None
         )
         
         cursor.execute(insert_query, params)
@@ -226,9 +236,207 @@ def insert_skill(skill: Skill) -> bool:
         if connection:
             connection.rollback()
         import traceback
-        logging.error(f"Error inserting skill {skill.skill_name}: {e}")
+        logging.error(f"Error inserting skill '{skill.skill_name}' for job {skill.job_id}: {e}")
         logging.error(traceback.format_exc())
         return False
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
+
+def get_job_by_id(job_id: str, source: str) -> Optional[JobListing]:
+    """Retrieve a job listing by job_id and source"""
+    connection = None
+    cursor = None
+    
+    try:
+        connection = get_sql_connection()
+        cursor = connection.cursor()
+        
+        query = """
+        SELECT ID, JobID, Source, Title, Company, Link,
+               SalaryMin, SalaryMax, Location, OperatingMode, WorkType,
+               ExperienceLevel, EmploymentType, YearsOfExperience,
+               ScrapeDate, ListingStatus
+        FROM JobListings
+        WHERE JobID = %s AND Source = %s
+        """
+        
+        cursor.execute(query, (job_id, source))
+        row = cursor.fetchone()
+        
+        if not row:
+            return None
+            
+        job = JobListing(
+            job_id=row[1],
+            source=row[2],
+            title=row[3],
+            company=row[4],
+            link=row[5],
+            salary_min=row[6],
+            salary_max=row[7],
+            location=row[8],
+            operating_mode=row[9],
+            work_type=row[10],
+            experience_level=row[11],
+            employment_type=row[12],
+            years_of_experience=row[13],
+            scrape_date=row[14],
+            listing_status=row[15]
+        )
+        job.short_id = row[0]
+        
+        return job
+        
+    except Exception as e:
+        logging.error(f"Error retrieving job {job_id}: {e}")
+        return None
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
+
+def get_skills_for_job(job_id: str, source: str) -> List[Skill]:
+    """Retrieve all skills for a specific job"""
+    connection = None
+    cursor = None
+    skills = []
+    
+    try:
+        connection = get_sql_connection()
+        cursor = connection.cursor()
+        
+        query = """
+        SELECT JobID, ShortID, Source, SkillName, SkillCategory
+        FROM Skills
+        WHERE JobID = %s AND Source = %s
+        """
+        
+        cursor.execute(query, (job_id, source))
+        rows = cursor.fetchall()
+        
+        for row in rows:
+            skill = Skill(
+                job_id=row[0],
+                source=row[2],
+                skill_name=row[3],
+                skill_category=row[4],
+                short_id=row[1]
+            )
+            skills.append(skill)
+            
+        return skills
+        
+    except Exception as e:
+        logging.error(f"Error retrieving skills for job {job_id}: {e}")
+        return []
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
+
+def update_job_status(job_id: str, source: str, status: str) -> bool:
+    """Update the status of a job listing"""
+    connection = None
+    cursor = None
+    
+    try:
+        connection = get_sql_connection()
+        cursor = connection.cursor()
+        
+        query = """
+        UPDATE JobListings
+        SET ListingStatus = %s
+        WHERE JobID = %s AND Source = %s
+        """
+        
+        cursor.execute(query, (_truncate(status, 20), job_id, source))
+        rows_affected = cursor.rowcount
+        connection.commit()
+        
+        if rows_affected > 0:
+            logging.info(f"Updated job {job_id} status to {status}")
+            return True
+        else:
+            logging.warning(f"No job found to update: {job_id}")
+            return False
+            
+    except Exception as e:
+        if connection:
+            connection.rollback()
+        logging.error(f"Error updating job status for {job_id}: {e}")
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
+
+def get_all_active_jobs(source: Optional[str] = None) -> List[JobListing]:
+    """Retrieve all active job listings, optionally filtered by source"""
+    connection = None
+    cursor = None
+    jobs = []
+    
+    try:
+        connection = get_sql_connection()
+        cursor = connection.cursor()
+        
+        if source:
+            query = """
+            SELECT ID, JobID, Source, Title, Company, Link,
+                   SalaryMin, SalaryMax, Location, OperatingMode, WorkType,
+                   ExperienceLevel, EmploymentType, YearsOfExperience,
+                   ScrapeDate, ListingStatus
+            FROM JobListings
+            WHERE ListingStatus = 'Active' AND Source = %s
+            ORDER BY ScrapeDate DESC
+            """
+            cursor.execute(query, (source,))
+        else:
+            query = """
+            SELECT ID, JobID, Source, Title, Company, Link,
+                   SalaryMin, SalaryMax, Location, OperatingMode, WorkType,
+                   ExperienceLevel, EmploymentType, YearsOfExperience,
+                   ScrapeDate, ListingStatus
+            FROM JobListings
+            WHERE ListingStatus = 'Active'
+            ORDER BY ScrapeDate DESC
+            """
+            cursor.execute(query)
+        
+        rows = cursor.fetchall()
+        
+        for row in rows:
+            job = JobListing(
+                job_id=row[1],
+                source=row[2],
+                title=row[3],
+                company=row[4],
+                link=row[5],
+                salary_min=row[6],
+                salary_max=row[7],
+                location=row[8],
+                operating_mode=row[9],
+                work_type=row[10],
+                experience_level=row[11],
+                employment_type=row[12],
+                years_of_experience=row[13],
+                scrape_date=row[14],
+                listing_status=row[15]
+            )
+            job.short_id = row[0]
+            jobs.append(job)
+            
+        return jobs
+        
+    except Exception as e:
+        logging.error(f"Error retrieving active jobs: {e}")
+        return []
     finally:
         if cursor:
             cursor.close()
