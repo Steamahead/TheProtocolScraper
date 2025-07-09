@@ -5,7 +5,7 @@ from datetime import datetime
 
 from scraper import fetch_listings
 from models import JobListing
-# from database import insert_job_listing  # Disabled for testing
+from database import insert_job_listing  # Disabled for testing
 
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
