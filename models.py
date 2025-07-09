@@ -11,11 +11,11 @@ class JobListing:
     link: str                     # Direct URL to the job offer
     salary_min: Optional[int] = None
     salary_max: Optional[int] = None
-    location: Optional[str] = None
-    operating_mode: Optional[str] = None
-    work_type: Optional[str] = None
-    experience_level: Optional[str] = None
-    employment_type: Optional[str] = None
+    location: Optional[str] = ''
+    operating_mode: Optional[str] = ''
+    work_type: Optional[str] = ''
+    experience_level: Optional[str] = ''
+    employment_type: Optional[str] = ''
     years_of_experience: Optional[int] = None
     scrape_date: datetime = field(default_factory=datetime.utcnow)
     listing_status: str = 'Active'  # e.g., 'Active', 'Closed'
