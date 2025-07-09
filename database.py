@@ -1,7 +1,8 @@
 import pymssql
-from typing import Optional
 import os
+import sqlite3
 import logging
+from typing import List, Optional
 from datetime import datetime
 from models import JobListing, Skill
 
