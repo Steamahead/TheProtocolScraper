@@ -1,8 +1,15 @@
 import logging
 import azure.functions as func
 import json
-# --- CORRECTED IMPORTS ---
-# These now import from the project root, not a relative path.
+import sys
+import os
+
+# --- FIX for Import Errors ---
+# This adds the root of your project to the system path, ensuring all modules are found.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+# --- Original Imports ---
+# These will now work correctly.
 from scraper import run_scraper
 from database import create_tables_if_not_exist
 
