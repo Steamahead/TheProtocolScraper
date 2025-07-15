@@ -1,8 +1,10 @@
 import logging
 import azure.functions as func
 import json
-from .scraper import run_scraper
-from .database import create_tables_if_not_exist
+# --- CORRECTED IMPORTS ---
+# These now import from the project root, not a relative path.
+from scraper import run_scraper
+from database import create_tables_if_not_exist
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('HttpScrape function started.')
