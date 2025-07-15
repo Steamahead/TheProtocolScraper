@@ -5,11 +5,10 @@ from typing import List, Optional
 import requests
 from bs4 import BeautifulSoup
 
-# --- CORRECTED IMPORTS ---
-# These now import from the project root, not a relative path.
-from models import JobListing
-from database import insert_job_listing
-from base_scraper import BaseScraper 
+# --- CORRECTED RELATIVE IMPORTS ---
+from .models import JobListing
+from .database import insert_job_listing
+from .base_scraper import BaseScraper 
 
 class TheProtocolScraper(BaseScraper):
     """Scraper for theprotocol.it job board."""
@@ -23,12 +22,8 @@ class TheProtocolScraper(BaseScraper):
         """Parses the HTML of a single job listing page."""
         try:
             soup = BeautifulSoup(html, 'html.parser')
-
-            # --- Extract Title ---
             title_elem = soup.select_one('h1[data-test="text-offerTitle"]')
             title = title_elem.get_text(strip=True) if title_elem else "N/A"
-
-            # --- Extract Company ---
             company_elem = soup.select_one('a[data-test="anchor-company-link"]')
             company = "N/A"
             if company_elem:
@@ -37,35 +32,19 @@ class TheProtocolScraper(BaseScraper):
                     company = full_text.split(':')[-1].strip()
                 else:
                     company = full_text
-
-            # --- Extract Operating Mode ---
             mode_elem = soup.select_one('span[data-test="content-workModes"]')
             operating_mode = mode_elem.get_text(strip=True) if mode_elem else "N/A"
-            
-            # --- Generate JobID from URL ---
             job_id_match = re.search(r'oferta,([a-zA-Z0-9\-]+)$', job_url)
             job_id = job_id_match.group(1) if job_id_match else job_url
 
             job = JobListing(
-                job_id=job_id,
-                source='theprotocol.it',
-                title=title,
-                company=company,
-                link=job_url,
-                operating_mode=operating_mode,
-                salary_min=None,
-                salary_max=None,
-                location="N/A",
-                work_type="N/A",
-                experience_level="N/A",
-                employment_type="N/A",
-                years_of_experience=None,
-                scrape_date=datetime.utcnow(),
-                listing_status='Active'
+                job_id=job_id, source='theprotocol.it', title=title, company=company,
+                link=job_url, operating_mode=operating_mode, salary_min=None, salary_max=None,
+                location="N/A", work_type="N/A", experience_level="N/A", employment_type="N/A",
+                years_of_experience=None, scrape_date=datetime.utcnow(), listing_status='Active'
             )
             logging.info(f"Successfully parsed job: {job.title} at {job.company}")
             return job
-
         except Exception as e:
             self.logger.error(f"Error parsing detail page {job_url}: {e}", exc_info=True)
             return None
@@ -77,33 +56,25 @@ class TheProtocolScraper(BaseScraper):
         if not listings_html:
             self.logger.error("Failed to fetch the main listings page.")
             return []
-
         soup = BeautifulSoup(listings_html, 'html.parser')
         job_links = soup.select('a.anchor_anchor__J3_o5[data-test="link-offer"]')
-        
         all_jobs = []
         for link_elem in job_links:
             job_url = self.base_url + link_elem['href']
             detail_html = self.get_page_html(job_url)
-            
             if detail_html:
                 job_listing = self._parse_job_detail(detail_html, job_url)
                 if job_listing:
                     all_jobs.append(job_listing)
-
         self.logger.info(f"Scrape complete. Found {len(all_jobs)} total jobs.")
         return all_jobs
 
 def run_scraper():
-    """
-    Initializes and runs the scraper.
-    """
+    """Initializes and runs the scraper."""
     logging.info("Scraper process started.")
     scraper = TheProtocolScraper()
     jobs = scraper.scrape()
-    
     for job in jobs:
         insert_job_listing(job)
-    
     logging.info(f"Scraping finished. {len(jobs)} jobs processed.")
     return jobs
