@@ -5,10 +5,11 @@ from typing import List, Optional
 import requests
 from bs4 import BeautifulSoup
 
-# Assuming base_scraper.py, models.py, and database.py are in the same directory (HttpScrape/)
-from .models import JobListing
-from .database import insert_job_listing
-from .base_scraper import BaseScraper 
+# --- CORRECTED IMPORTS ---
+# These now import from the project root, not a relative path.
+from models import JobListing
+from database import insert_job_listing
+from base_scraper import BaseScraper 
 
 class TheProtocolScraper(BaseScraper):
     """Scraper for theprotocol.it job board."""
@@ -32,11 +33,10 @@ class TheProtocolScraper(BaseScraper):
             company = "N/A"
             if company_elem:
                 full_text = company_elem.get_text(strip=True)
-                # Assumes format is "Firma: CompanyName"
                 if ':' in full_text:
                     company = full_text.split(':')[-1].strip()
                 else:
-                    company = full_text # Fallback if format changes
+                    company = full_text
 
             # --- Extract Operating Mode ---
             mode_elem = soup.select_one('span[data-test="content-workModes"]')
