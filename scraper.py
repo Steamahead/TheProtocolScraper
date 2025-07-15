@@ -1,60 +1,109 @@
+import logging
+import re
+from datetime import datetime
+from typing import List, Optional
 import requests
 from bs4 import BeautifulSoup
-from typing import List, Dict
-import logging
 
-headers = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/91.0.4472.124 Safari/537.36"
-    )
-}
+# Assuming base_scraper.py, models.py, and database.py are in the same directory (HttpScrape/)
+from .models import JobListing
+from .database import insert_job_listing
+from .base_scraper import BaseScraper 
 
-URL = (
-    "https://theprotocol.it/filtry/big-data-science;"
-    "sp/junior,assistant,trainee,mid;"
-    "p/warszawa;wp/praca/bi-developer-warszawa-zubra-1,oferta,"  
-    "952b0000-9568-9a92-a6a4-08ddba1ba907"
-)
+class TheProtocolScraper(BaseScraper):
+    """Scraper for theprotocol.it job board."""
 
-def fetch_listings() -> List[Dict[str, str]]:
-    """
-    Fetches the page and returns a list of dicts with 'title', 'company', and 'link'.
-    """
-    logging.info(f"Starting scrape of URL: {URL}")
-    
-    try:
-        resp = requests.get(URL, headers=headers, timeout=30)
-        resp.raise_for_status()
-        logging.info(f"HTTP request successful, status: {resp.status_code}")
-    except Exception as e:
-        logging.error(f"HTTP request failed: {e}")
-        raise
+    def __init__(self):
+        super().__init__()
+        self.base_url = "https://theprotocol.it"
+        self.search_url = "https://theprotocol.it/filtry/big-data-science;sp/junior,assistant,trainee,mid;p/warszawa"
 
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    jobs = soup.select('div.offer-card')
-    logging.info(f"Found {len(jobs)} job cards in HTML")
-    
-    results = []
+    def _parse_job_detail(self, html: str, job_url: str) -> Optional[JobListing]:
+        """Parses the HTML of a single job listing page."""
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
 
-    for i, job in enumerate(jobs):
-        title_elem = job.select_one('h2.title')
-        company_elem = job.select_one('div.company')
-        link_elem = job.select_one('a.offer-link')
+            # --- Extract Title ---
+            title_elem = soup.select_one('h1[data-test="text-offerTitle"]')
+            title = title_elem.get_text(strip=True) if title_elem else "N/A"
 
-        if not title_elem or not company_elem or not link_elem:
-            logging.warning(f"Job card {i+1} missing required elements")
-            continue
+            # --- Extract Company ---
+            company_elem = soup.select_one('a[data-test="anchor-company-link"]')
+            company = "N/A"
+            if company_elem:
+                full_text = company_elem.get_text(strip=True)
+                # Assumes format is "Firma: CompanyName"
+                if ':' in full_text:
+                    company = full_text.split(':')[-1].strip()
+                else:
+                    company = full_text # Fallback if format changes
 
-        job_data = {
-            'title': title_elem.get_text(strip=True),
-            'company': company_elem.get_text(strip=True),
-            'link': link_elem['href']
-        }
+            # --- Extract Operating Mode ---
+            mode_elem = soup.select_one('span[data-test="content-workModes"]')
+            operating_mode = mode_elem.get_text(strip=True) if mode_elem else "N/A"
+            
+            # --- Generate JobID from URL ---
+            job_id_match = re.search(r'oferta,([a-zA-Z0-9\-]+)$', job_url)
+            job_id = job_id_match.group(1) if job_id_match else job_url
+
+            job = JobListing(
+                job_id=job_id,
+                source='theprotocol.it',
+                title=title,
+                company=company,
+                link=job_url,
+                operating_mode=operating_mode,
+                salary_min=None,
+                salary_max=None,
+                location="N/A",
+                work_type="N/A",
+                experience_level="N/A",
+                employment_type="N/A",
+                years_of_experience=None,
+                scrape_date=datetime.utcnow(),
+                listing_status='Active'
+            )
+            logging.info(f"Successfully parsed job: {job.title} at {job.company}")
+            return job
+
+        except Exception as e:
+            self.logger.error(f"Error parsing detail page {job_url}: {e}", exc_info=True)
+            return None
+
+    def scrape(self) -> List[JobListing]:
+        """Main scraping method for The Protocol."""
+        self.logger.info(f"Fetching listings from {self.search_url}")
+        listings_html = self.get_page_html(self.search_url)
+        if not listings_html:
+            self.logger.error("Failed to fetch the main listings page.")
+            return []
+
+        soup = BeautifulSoup(listings_html, 'html.parser')
+        job_links = soup.select('a.anchor_anchor__J3_o5[data-test="link-offer"]')
         
-        results.append(job_data)
-        logging.info(f"Parsed job {i+1}: {job_data['title']} at {job_data['company']}")
+        all_jobs = []
+        for link_elem in job_links:
+            job_url = self.base_url + link_elem['href']
+            detail_html = self.get_page_html(job_url)
+            
+            if detail_html:
+                job_listing = self._parse_job_detail(detail_html, job_url)
+                if job_listing:
+                    all_jobs.append(job_listing)
 
-    logging.info(f"Successfully parsed {len(results)} jobs")
-    return results
+        self.logger.info(f"Scrape complete. Found {len(all_jobs)} total jobs.")
+        return all_jobs
+
+def run_scraper():
+    """
+    Initializes and runs the scraper.
+    """
+    logging.info("Scraper process started.")
+    scraper = TheProtocolScraper()
+    jobs = scraper.scrape()
+    
+    for job in jobs:
+        insert_job_listing(job)
+    
+    logging.info(f"Scraping finished. {len(jobs)} jobs processed.")
+    return jobs
