@@ -1,4 +1,4 @@
-name: Build and deploy Python project to Azure Function App - MyProtocolScraperApp
+name: Build and Deploy Docker Image to Azure Function App
 
 on:
   push:
@@ -7,30 +7,29 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.' # set this to the path to your web app project, defaults to the repository root
-  PYTHON_VERSION: '3.11' # set this to the python version to use
+  AZURE_FUNCTIONAPP_NAME: 'MyProtocolScraperApp'   # The name of your function app
+  DOCKER_IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/myprotocolscraperapp # Your Docker Hub username/image_name
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    environment:
-      name: 'Production'
-      url: ${{ steps.deploy-to-function.outputs.webapp-url }}
-    permissions:
-      id-token: write #This is required for requesting the JWT
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python version
-        uses: actions/setup-python@v5
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Install dependencies into a package directory
-        run: |
-          pip install --target=".python_packages/lib/site-packages" -r requirements.txt
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
 
       - name: Login to Azure
         uses: azure/login@v2
@@ -41,8 +40,7 @@ jobs:
 
       - name: 'Deploy to Azure Functions'
         uses: Azure/functions-action@v1
-        id: deploy-to-function
         with:
-          app-name: 'MyProtocolScraperApp'
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           slot-name: 'Production'
-          package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
+          images: ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }} # Deploy the Docker image
