@@ -37,6 +37,31 @@ class TheProtocolScraper(BaseScraper):
             # Operating mode
             mode_elem = soup.select_one('span[data-test="content-workModes"]')
             operating_mode = mode_elem.get_text(strip=True) if mode_elem else "N/A"
+            # Location
+            location_elem = soup.select_one('span[data-test="text-primaryLocation"]')
+            location = location_elem.get_text(strip=True) if location_elem else "N/A"
+            # Work type
+            work_type_elem = soup.select_one('span[data-test="text-contractName"]')
+            work_type = work_type_elem.get_text(strip=True) if work_type_elem else "N/A"
+            # Experience level
+            exp_elem = soup.select_one('span[data-test="content-positionLevels"]')
+            experience_level = (
+                exp_elem.get_text(separator=", ", strip=True)
+                .replace('•', ',') if exp_elem else "N/A"
+            )
+            # Employment type (same selector as work type)
+            employment_type = work_type
+            # Salary
+            salary_elem = soup.select_one('span[data-test="text-contractSalary"]')
+            salary_min = salary_max = None
+            if salary_elem:
+                # Extract numbers
+                nums = re.findall(r"\d+", salary_elem.get_text())
+                if len(nums) >= 2:
+                    salary_min, salary_max = int(nums[0]), int(nums[1])
+                elif len(nums) == 1:
+                    salary_min = int(nums[0])
+
             # Job ID extraction (use the UUID after ',oferta,')
             job_id_match = re.search(r',oferta,([a-zA-Z0-9\-]+)', job_url)
             job_id = job_id_match.group(1) if job_id_match else job_url
@@ -48,12 +73,12 @@ class TheProtocolScraper(BaseScraper):
                 company=company,
                 link=job_url,
                 operating_mode=operating_mode,
-                salary_min=None,
-                salary_max=None,
-                location="N/A",
-                work_type="N/A",
-                experience_level="N/A",
-                employment_type="N/A",
+                salary_min=salary_min,
+                salary_max=salary_max,
+                location=location,
+                work_type=work_type,
+                experience_level=experience_level,
+                employment_type=employment_type,
                 years_of_experience=None,
                 scrape_date=datetime.utcnow(),
                 listing_status='Active'
@@ -82,7 +107,6 @@ class TheProtocolScraper(BaseScraper):
             self.logger.warning(
                 "Primary selector returned 0 links; dumping all <a href> containing 'oferta'."
             )
-            # collect all hrefs containing ',oferta,'
             candidate_links = [a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']]
             self.logger.info(f"Found {len(candidate_links)} hrefs with ',oferta,': {candidate_links}")
             # Fallback: pick links containing ',oferta,'
