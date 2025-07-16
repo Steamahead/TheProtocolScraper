@@ -1,20 +1,22 @@
 import logging
 import re
+import time
+import random
 from datetime import datetime
-from typing import List, Optional, Set, Dict
+from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- Corrected relative imports ---
-from .models import JobListing, Skill
-from .database import insert_job_listing, insert_skill
+from .models import JobListing
+from .database import insert_job_listing
 from .base_scraper import BaseScraper
 
 class TheProtocolScraper(BaseScraper):
-    """Scraper for theprotocol.it job board with pagination, unified numeric job IDs, skill extraction, and parallel detail fetching."""
+    """Scraper for theprotocol.it job board with pagination, concurrency, and polite request pacing."""
 
-    def __init__(self, max_workers: int = 10):
+    def __init__(self, max_workers: int = 10, min_delay: float = 1.0, max_delay: float = 3.0):
         super().__init__()
         self.base_url = "https://theprotocol.it"
         self.search_url = (
@@ -22,102 +24,122 @@ class TheProtocolScraper(BaseScraper):
             "sp/junior,assistant,trainee,mid;p/warszawa"
         )
         self.max_workers = max_workers
-        # skill categories mapping omitted for brevity (unchanged)
-        self.skill_categories: Dict[str, List[str]] = {
-            "Database": ["sql", "mysql", "postgresql", "oracle", "nosql", "mongodb"],
-            "Visualization": ["power bi", "tableau", "qlik", "grafana"],
-            "Cloud": ["azure", "aws", "gcp"],
-            "Programming": ["python", "java", "scala", "javascript", "r"],
-        }
-
-    def _map_skill(self, raw: str) -> Optional[Skill]:
-        text = raw.strip().lower()
-        for category, skills in self.skill_categories.items():
-            for sk in skills:
-                if sk in text:
-                    return Skill(job_id="", source="theprotocol.it", skill_name=sk.title(), skill_category=category)
-        return None
-
-    def _extract_skills(self, soup: BeautifulSoup) -> Set[str]:
-        raw_skills = set()
-        for chip in soup.select('div[data-test="chip-technology"]'):
-            title = chip.get('title') or chip.get_text(strip=True)
-            if title:
-                raw_skills.add(title)
-        return raw_skills
-
-    def _parse_job_detail(self, html: str, job_url: str) -> Optional[JobListing]:
-        try:
-            soup = BeautifulSoup(html, 'html.parser')
-            # parse fields (unchanged from previous version)
-            title_elem = soup.select_one('h1[data-test="text-offerTitle"]')
-            title = title_elem.get_text(strip=True) if title_elem else "N/A"
-            company_elem = soup.select_one('a[data-test="anchor-company-link"]')
-            company = company_elem.get_text(strip=True).split(':')[-1].strip() if company_elem else "N/A"
-            operating_mode = soup.select_one('span[data-test="content-workModes"]').get_text(strip=True) if soup.select_one('span[data-test="content-workModes"]') else "N/A"
-            location = soup.select_one('span[data-test="text-primaryLocation"]').get_text(strip=True) if soup.select_one('span[data-test="text-primaryLocation"]') else "N/A"
-            # bracketed work type
-            cont_text = soup.select_one('span[data-test="text-contractName"]').get_text() if soup.select_one('span[data-test="text-contractName"]') else ""
-            work_type_match = re.search(r"\(([^)]+)\)", cont_text)
-            work_type = work_type_match.group(1) if work_type_match else cont_text.strip() or "N/A"
-            experience_level = soup.select_one('span[data-test="content-positionLevels"]').get_text(separator=", ", strip=True).replace('•', ',') if soup.select_one('span[data-test="content-positionLevels"]') else "N/A"
-            salary_text = soup.select_one('span[data-test="text-contractSalary"]').get_text() if soup.select_one('span[data-test="text-contractSalary"]') else ""
-            nums = re.findall(r"\d+", salary_text)
-            salary_min, salary_max = (int(nums[0]), int(nums[1])) if len(nums) >= 2 else (int(nums[0]), None) if nums else (None, None)
-            # numeric job ID if exists
-            id_elem = soup.select_one('span[data-test="text-offerId"]')
-            if id_elem and id_elem.get_text(strip=True).isdigit():
-                job_id = id_elem.get_text(strip=True)
-            else:
-                uuid_match = re.search(r',oferta,([a-zA-Z0-9\-]+)', job_url)
-                job_id = uuid_match.group(1) if uuid_match else job_url
-
-            job = JobListing(
-                job_id=job_id, source='theprotocol.it', title=title, company=company,
-                link=job_url, salary_min=salary_min, salary_max=salary_max,
-                location=location, operating_mode=operating_mode, work_type=work_type,
-                experience_level=experience_level, employment_type=work_type,
-                years_of_experience=None, scrape_date=datetime.utcnow(), listing_status='Active'
+        self.min_delay = min_delay
+        self.max_delay = max_delay
+        # Use a session with a realistic User-Agent
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/115.0 Safari/537.36'
             )
-            # insert skills
-            soup_skills = self._extract_skills(soup)
-            for raw in soup_skills:
-                sk_obj = self._map_skill(raw)
-                if sk_obj:
-                    sk_obj.job_id = job.job_id
-                    insert_skill(sk_obj)
-            return job
+        })
+
+    def _throttled_get(self, url: str) -> Optional[str]:
+        """Fetch a URL with a random delay to reduce bot detection."""
+        time.sleep(random.uniform(self.min_delay, self.max_delay))
+        try:
+            resp = self.session.get(url, timeout=15)
+            resp.raise_for_status()
+            return resp.text
         except Exception as e:
-            self.logger.error(f"Error parsing detail {job_url}: {e}", exc_info=True)
+            self.logger.warning(f"Request failed for {url}: {e}")
             return None
 
+    def _parse_job_detail(self, html: str, job_url: str) -> Optional[JobListing]:
+        # unchanged parsing logic...
+        soup = BeautifulSoup(html, 'html.parser')
+        # Title
+        title_elem = soup.select_one('h1[data-test="text-offerTitle"]')
+        title = title_elem.get_text(strip=True) if title_elem else "N/A"
+        # Company
+        company_elem = soup.select_one('a[data-test="anchor-company-link"]')
+        company = "N/A"
+        if company_elem:
+            full_text = company_elem.get_text(strip=True)
+            company = full_text.split(':')[-1].strip() if ':' in full_text else full_text
+        # Operating mode
+        mode_elem = soup.select_one('span[data-test="content-workModes"]')
+        operating_mode = mode_elem.get_text(strip=True) if mode_elem else "N/A"
+        # Location
+        location_elem = soup.select_one('span[data-test="text-primaryLocation"]')
+        location = location_elem.get_text(strip=True) if location_elem else "N/A"
+        # Work type
+        contract_elem = soup.select_one('span[data-test="text-contractName"]')
+        work_type = "N/A"
+        if contract_elem:
+            match = re.search(r"\(([^)]+)\)", contract_elem.get_text())
+            work_type = match.group(1) if match else contract_elem.get_text(strip=True)
+        employment_type = work_type
+        # Experience level
+        exp_elem = soup.select_one('span[data-test="content-positionLevels"]')
+        experience_level = (
+            exp_elem.get_text(separator=", ", strip=True).replace('•', ',')
+            if exp_elem else "N/A"
+        )
+        # Salary
+        salary_min = salary_max = None
+        salary_elem = soup.select_one('span[data-test="text-contractSalary"]')
+        if salary_elem:
+            nums = re.findall(r"\d+", salary_elem.get_text())
+            if len(nums) >= 2:
+                salary_min, salary_max = int(nums[0]), int(nums[1])
+            elif nums:
+                salary_min = int(nums[0])
+        # Job ID
+        id_elem = soup.select_one('span[data-test="text-offerId"]')
+        if id_elem and id_elem.get_text(strip=True).isdigit():
+            job_id = id_elem.get_text(strip=True)
+        else:
+            uuid_match = re.search(r',oferta,([a-zA-Z0-9\-]+)', job_url)
+            job_id = uuid_match.group(1) if uuid_match else job_url
+
+        return JobListing(
+            job_id=job_id,
+            source='theprotocol.it',
+            title=title,
+            company=company,
+            link=job_url,
+            operating_mode=operating_mode,
+            salary_min=salary_min,
+            salary_max=salary_max,
+            location=location,
+            work_type=work_type,
+            experience_level=experience_level,
+            employment_type=employment_type,
+            years_of_experience=None,
+            scrape_date=datetime.utcnow(),
+            listing_status='Active'
+        )
+
     def scrape(self) -> List[JobListing]:
-        self.logger.info("Starting pagination scrape with parallel detail fetch.")
+        """Fetch listings across pages and parse details with throttling."""
+        self.logger.info("Starting scrape with polite pacing.")
         all_jobs: List[JobListing] = []
         page = 1
         while True:
-            url = f"{self.search_url}?page={page}"
-            self.logger.info(f"Fetching page {page}")
-            html = self.get_page_html(url)
+            # For page 1, use base search URL; subsequent pages append ?page=
+            page_url = self.search_url if page == 1 else f"{self.search_url}?page={page}"
+            self.logger.info(f"Fetching listing page {page} at {page_url}.")
+            html = self._throttled_get(page_url)
             if not html:
+                self.logger.info(f"Failed or no HTML for page {page}, stopping pagination.")
                 break
             soup = BeautifulSoup(html, 'html.parser')
-            links = [a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']]
-            if not links:
+            hrefs = [a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']]
+            unique_hrefs = list(dict.fromkeys(hrefs))
+            if not unique_hrefs:
+                self.logger.info(f"No job links on page {page}, ending pagination.")
                 break
-            unique_links = list(dict.fromkeys(links))
-            self.logger.info(f"Page {page}: {len(unique_links)} listings")
-
-            # parallel fetch details
+            self.logger.info(f"Page {page}: found {len(unique_hrefs)} listings.")
+            # fetch details with ThreadPool but still throttling inside
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                future_to_url = {
-                    executor.submit(self.get_page_html, self.base_url + href): href
-                    for href in unique_links
-                }
-                for future in as_completed(future_to_url):
-                    href = future_to_url[future]
+                futures = {executor.submit(self._throttled_get, self.base_url + href): href for href in unique_hrefs}
+                for future in as_completed(futures):
+                    href = futures[future]
                     try:
-                        detail_html = future.result(timeout=30)
+                        detail_html = future.result(timeout=self.max_delay + 5)
                         if detail_html:
                             job = self._parse_job_detail(detail_html, self.base_url + href)
                             if job:
@@ -125,15 +147,15 @@ class TheProtocolScraper(BaseScraper):
                     except Exception as e:
                         self.logger.warning(f"Failed to fetch or parse {href}: {e}")
             page += 1
-        self.logger.info(f"Scrape complete: {len(all_jobs)} jobs total.")
+        self.logger.info(f"Scraping done: total {len(all_jobs)} jobs.")
         return all_jobs
 
 
 def run_scraper():
     logging.info("Scraper started.")
-    scraper = TheProtocolScraper()
+    scraper = TheProtocolScraper(max_workers=10, min_delay=1.0, max_delay=3.0)
     jobs = scraper.scrape()
     for job in jobs:
         insert_job_listing(job)
-    self.logger.info(f"Finished: {len(jobs)} jobs inserted.")
+    logging.info(f"Inserted {len(jobs)} jobs.")
     return jobs
