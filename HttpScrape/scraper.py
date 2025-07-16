@@ -1,5 +1,6 @@
 import logging
 import re
+import os  # <-- Import the os library
 from datetime import datetime
 from typing import List, Optional, Tuple
 from bs4 import BeautifulSoup
@@ -8,6 +9,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service as ChromeService # <-- Import Service
 from selenium.common.exceptions import TimeoutException
 
 # --- CORRECTED RELATIVE IMPORTS ---
@@ -30,32 +32,37 @@ class TheProtocolScraper(BaseScraper):
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         
-        driver = webdriver.Chrome(options=chrome_options)
+        # --- NEW: Point Selenium to the local chromedriver ---
+        # Get the directory where this script is located
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # Build the full path to the chromedriver executable
+        chromedriver_path = os.path.join(script_dir, "chromedriver")
+        
+        # Ensure the driver is executable
+        os.chmod(chromedriver_path, 0o755)
+
+        service = ChromeService(executable_path=chromedriver_path)
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        
         try:
             logging.info(f"Selenium is navigating to: {url}")
             driver.get(url)
-            # --- INCREASED TIMEOUT AND ADDED MORE SPECIFIC WAIT CONDITION ---
             WebDriverWait(driver, 40).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, 'a[data-test="link-offer"]'))
             )
             logging.info("Selenium successfully found job links on the page.")
             return driver.page_source
         except TimeoutException:
-            # --- NEW: Log the page source if the timeout occurs for debugging ---
             logging.error("TimeoutException: The page did not load the expected elements in time.")
             logging.error("--- Page Source at time of Timeout ---")
             logging.error(driver.page_source)
             logging.error("--- End of Page Source ---")
-            # Re-raise the exception to be handled by the main function
             raise
         finally:
             driver.quit()
 
     def _parse_job_detail(self, html: str, job_url: str) -> Optional[Tuple[JobListing, List[str]]]:
-        """
-        Parses the HTML of a single job listing page.
-        Returns a tuple containing the JobListing object and a list of skill strings.
-        """
+        """Parses the HTML of a single job listing page."""
         try:
             soup = BeautifulSoup(html, 'html.parser')
             title = soup.select_one('h1[data-test="text-offerTitle"]').get_text(strip=True)
@@ -88,7 +95,7 @@ class TheProtocolScraper(BaseScraper):
             return None
 
     def scrape(self) -> List[Tuple[JobListing, List[str]]]:
-        """Main scraping method. Returns a list of tuples (JobListing, skills)."""
+        """Main scraping method."""
         self.logger.info(f"Fetching listings from {self.search_url}")
         listings_html = self.get_page_html_with_selenium(self.search_url)
         if not listings_html:
@@ -122,7 +129,6 @@ def run_scraper():
         
         if job_db_id and skills:
             job.short_id = job_db_id
-            logging.info(f"Inserting {len(skills)} skills for job ID {job.job_id}")
             for skill_name in skills:
                 skill = Skill(
                     job_id=job.job_id,
