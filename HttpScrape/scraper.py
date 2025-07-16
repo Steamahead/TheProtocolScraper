@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 # --- CORRECTED RELATIVE IMPORTS ---
 from .models import JobListing
 from .database import insert_job_listing
-from .base_scraper import BaseScraper 
+from .base_scraper import BaseScraper
 
 class TheProtocolScraper(BaseScraper):
     """Scraper for theprotocol.it job board."""
@@ -57,7 +57,8 @@ class TheProtocolScraper(BaseScraper):
             self.logger.error("Failed to fetch the main listings page.")
             return []
         soup = BeautifulSoup(listings_html, 'html.parser')
-        job_links = soup.select('a.anchor_anchor__J3_o5[data-test="link-offer"]')
+        # --- CORRECTED CSS SELECTOR ---
+        job_links = soup.select('a[data-test="link-offer"]')
         all_jobs = []
         for link_elem in job_links:
             job_url = self.base_url + link_elem['href']
