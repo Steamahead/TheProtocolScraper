@@ -37,8 +37,8 @@ class TheProtocolScraper(BaseScraper):
             # Operating mode
             mode_elem = soup.select_one('span[data-test="content-workModes"]')
             operating_mode = mode_elem.get_text(strip=True) if mode_elem else "N/A"
-            # Job ID extraction
-            job_id_match = re.search(r'oferta,([a-zA-Z0-9\-]+)$', job_url)
+            # Job ID extraction (use the UUID after ',oferta,')
+            job_id_match = re.search(r',oferta,([a-zA-Z0-9\-]+)', job_url)
             job_id = job_id_match.group(1) if job_id_match else job_url
 
             job = JobListing(
@@ -82,15 +82,15 @@ class TheProtocolScraper(BaseScraper):
             self.logger.warning(
                 "Primary selector returned 0 links; dumping all <a href> containing 'oferta'."
             )
-            candidate_links = [a['href'] for a in soup.find_all('a', href=True) if 'oferta' in a['href']]
-            # Log candidates at INFO to ensure visibility
-            self.logger.info(f"Found {len(candidate_links)} hrefs with 'oferta': {candidate_links}")
-            # Fallback: pick any link starting with '/oferta'
+            # collect all hrefs containing ',oferta,'
+            candidate_links = [a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']]
+            self.logger.info(f"Found {len(candidate_links)} hrefs with ',oferta,': {candidate_links}")
+            # Fallback: pick links containing ',oferta,'
             job_links = [
                 a for a in soup.find_all('a', href=True)
-                if a['href'].startswith('/oferta')
+                if ',oferta,' in a['href']
             ]
-            self.logger.info(f"After startswith('/oferta') filter: {len(job_links)} links")
+            self.logger.info(f"After fallback filter: {len(job_links)} links")
 
         all_jobs: List[JobListing] = []
         for link_elem in job_links:
