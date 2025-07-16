@@ -53,6 +53,9 @@ class TheProtocolScraper(BaseScraper):
         """Main scraping method for The Protocol."""
         self.logger.info(f"Fetching listings from {self.search_url}")
         listings_html = self.get_page_html(self.search_url)
+        # — DEBUG: dump first 500 chars so we can inspect the page structure in logs
+        self.logger.debug("Listings HTML snippet:\n" + listings_html[:500])
+
         if not listings_html:
             self.logger.error("Failed to fetch the main listings page.")
             return []
@@ -62,13 +65,16 @@ class TheProtocolScraper(BaseScraper):
         job_links = soup.select('a[data-test="link-offer"]')
         if not job_links:
             self.logger.warning(
-                "Primary selector `a[data-test=\"link-offer\"]` returned 0 links; falling back to href-based scan."
+                "Primary selector returned 0 links; dumping all <a href> containing 'oferta'."
             )
+            candidate_links = [a['href'] for a in soup.find_all('a', href=True) if 'oferta' in a['href']]
+            self.logger.debug(f"Found {len(candidate_links)} hrefs with 'oferta': {candidate_links}")
+            # now pick whichever pattern matches your site (comma? slash? both?)
             job_links = [
                 a for a in soup.find_all('a', href=True)
-                # adjust the pattern if your URLs change
-                if re.search(r'/oferta,', a['href'])
+                if a['href'].startswith('/oferta')  # simpler: any link starting with "/oferta"
             ]
+            self.logger.info(f"After startswith('/oferta') filter: {len(job_links)} links")
         
         all_jobs = []
         for link_elem in job_links:
