@@ -1,32 +1,37 @@
 # Start with the official Azure Functions Python base image
 FROM mcr.microsoft.com/azure-functions/python:4-python3.11
 
-# Install system dependencies for Chrome, chromedriver, and jq
-RUN apt-get update && apt-get install -y \
+# Set versions for Chrome and Chromedriver for stability
+ENV CHROME_VERSION="126.0.6478.126"
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
-    gnupg \
     unzip \
-    jq \
+    ca-certificates \
+    fonts-liberation \
+    libu2f-udev \
+    libvulkan1 \
+    xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Download and install Google Chrome
-RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome-keyring.gpg
-RUN echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list
-RUN apt-get update && apt-get install -y google-chrome-stable
+# Download, install, and link Google Chrome
+RUN wget -q https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chrome-linux64.zip -O /tmp/chrome.zip \
+    && unzip /tmp/chrome.zip -d /opt/ \
+    && rm /tmp/chrome.zip \
+    && ln -s /opt/chrome-linux64/chrome /usr/bin/google-chrome
 
-# Download and install the matching chromedriver
-# This command now uses jq to parse the correct driver version
-RUN LATEST_DRIVER_URL=$(wget -qO- "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json" | jq -r ".channels.Stable.downloads.chromedriver[] | select(.platform==\"linux-x64\") | .url") && \
-    wget -q "$LATEST_DRIVER_URL" -O /tmp/chromedriver.zip && \
-    unzip /tmp/chromedriver.zip -d /usr/bin && \
-    mv /usr/bin/chromedriver-linux64/chromedriver /usr/bin/chromedriver && \
-    rm -rf /tmp/chromedriver.zip /usr/bin/chromedriver-linux64
+# Download, install, and link Chromedriver
+RUN wget -q https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chromedriver-linux64.zip -O /tmp/chromedriver.zip \
+    && unzip /tmp/chromedriver.zip -d /opt/ \
+    && rm /tmp/chromedriver.zip \
+    && ln -s /opt/chromedriver-linux64/chromedriver /usr/bin/chromedriver
 
-# Copy your requirements.txt and install Python packages
+# Copy and install Python packages
 ENV AzureWebJobsScriptRoot=/home/site/wwwroot
 WORKDIR /home/site/wwwroot
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy your function app code
 COPY . .
