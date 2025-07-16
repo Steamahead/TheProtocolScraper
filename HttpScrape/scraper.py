@@ -1,20 +1,13 @@
 import logging
 import re
-import os  # <-- Import the os library
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import List, Optional
+import requests
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service as ChromeService # <-- Import Service
-from selenium.common.exceptions import TimeoutException
 
 # --- CORRECTED RELATIVE IMPORTS ---
-from .models import JobListing, Skill
-from .database import insert_job_listing, insert_skill
+from .models import JobListing
+from .database import insert_job_listing
 from .base_scraper import BaseScraper
 
 class TheProtocolScraper(BaseScraper):
@@ -25,120 +18,64 @@ class TheProtocolScraper(BaseScraper):
         self.base_url = "https://theprotocol.it"
         self.search_url = "https://theprotocol.it/filtry/big-data-science;sp/junior,assistant,trainee,mid;p/warszawa"
 
-    def get_page_html_with_selenium(self, url: str) -> str:
-        """Get HTML content from a URL using Selenium, with enhanced error handling."""
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        
-        # --- NEW: Point Selenium to the local chromedriver ---
-        # Get the directory where this script is located
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        # Build the full path to the chromedriver executable
-        chromedriver_path = os.path.join(script_dir, "chromedriver")
-        
-        # Ensure the driver is executable
-        os.chmod(chromedriver_path, 0o755)
-
-        service = ChromeService(executable_path=chromedriver_path)
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        
-        try:
-            logging.info(f"Selenium is navigating to: {url}")
-            driver.get(url)
-            WebDriverWait(driver, 40).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, 'a[data-test="link-offer"]'))
-            )
-            logging.info("Selenium successfully found job links on the page.")
-            return driver.page_source
-        except TimeoutException:
-            logging.error("TimeoutException: The page did not load the expected elements in time.")
-            logging.error("--- Page Source at time of Timeout ---")
-            logging.error(driver.page_source)
-            logging.error("--- End of Page Source ---")
-            raise
-        finally:
-            driver.quit()
-
-    def _parse_job_detail(self, html: str, job_url: str) -> Optional[Tuple[JobListing, List[str]]]:
+    def _parse_job_detail(self, html: str, job_url: str) -> Optional[JobListing]:
         """Parses the HTML of a single job listing page."""
         try:
             soup = BeautifulSoup(html, 'html.parser')
-            title = soup.select_one('h1[data-test="text-offerTitle"]').get_text(strip=True)
+            title_elem = soup.select_one('h1[data-test="text-offerTitle"]')
+            title = title_elem.get_text(strip=True) if title_elem else "N/A"
             company_elem = soup.select_one('a[data-test="anchor-company-link"]')
             company = "N/A"
             if company_elem:
                 full_text = company_elem.get_text(strip=True)
-                company = full_text.split(':')[-1].strip() if ':' in full_text else full_text
-
-            operating_mode = soup.select_one('span[data-test="content-workModes"]').get_text(strip=True)
+                if ':' in full_text:
+                    company = full_text.split(':')[-1].strip()
+                else:
+                    company = full_text
+            mode_elem = soup.select_one('span[data-test="content-workModes"]')
+            operating_mode = mode_elem.get_text(strip=True) if mode_elem else "N/A"
             job_id_match = re.search(r'oferta,([a-zA-Z0-9\-]+)$', job_url)
             job_id = job_id_match.group(1) if job_id_match else job_url
 
             job = JobListing(
                 job_id=job_id, source='theprotocol.it', title=title, company=company,
-                link=job_url, operating_mode=operating_mode
+                link=job_url, operating_mode=operating_mode, salary_min=None, salary_max=None,
+                location="N/A", work_type="N/A", experience_level="N/A", employment_type="N/A",
+                years_of_experience=None, scrape_date=datetime.utcnow(), listing_status='Active'
             )
-
-            skills = []
-            requirements_section = soup.select_one('div[data-test="section-requirements"]')
-            if requirements_section:
-                skill_elements = requirements_section.select('ul > li')
-                for skill_elem in skill_elements:
-                    skills.append(skill_elem.get_text(strip=True))
-            
-            logging.info(f"Successfully parsed job: {job.title}. Found {len(skills)} skills.")
-            return job, skills
+            logging.info(f"Successfully parsed job: {job.title} at {job.company}")
+            return job
         except Exception as e:
             self.logger.error(f"Error parsing detail page {job_url}: {e}", exc_info=True)
             return None
 
-    def scrape(self) -> List[Tuple[JobListing, List[str]]]:
-        """Main scraping method."""
+    def scrape(self) -> List[JobListing]:
+        """Main scraping method for The Protocol."""
         self.logger.info(f"Fetching listings from {self.search_url}")
-        listings_html = self.get_page_html_with_selenium(self.search_url)
+        listings_html = self.get_page_html(self.search_url)
         if not listings_html:
             self.logger.error("Failed to fetch the main listings page.")
             return []
-            
         soup = BeautifulSoup(listings_html, 'html.parser')
+        # --- CORRECTED CSS SELECTOR ---
         job_links = soup.select('a[data-test="link-offer"]')
-        
-        all_job_data = []
+        all_jobs = []
         for link_elem in job_links:
             job_url = self.base_url + link_elem['href']
             detail_html = self.get_page_html(job_url)
             if detail_html:
-                parsed_data = self._parse_job_detail(detail_html, job_url)
-                if parsed_data:
-                    all_job_data.append(parsed_data)
-                    
-        self.logger.info(f"Scrape complete. Found {len(all_job_data)} total jobs.")
-        return all_job_data
+                job_listing = self._parse_job_detail(detail_html, job_url)
+                if job_listing:
+                    all_jobs.append(job_listing)
+        self.logger.info(f"Scrape complete. Found {len(all_jobs)} total jobs.")
+        return all_jobs
 
 def run_scraper():
-    """Initializes and runs the scraper, and saves job and skills to the database."""
+    """Initializes and runs the scraper."""
     logging.info("Scraper process started.")
     scraper = TheProtocolScraper()
-    jobs_with_skills = scraper.scrape()
-    
-    processed_count = 0
-    for job, skills in jobs_with_skills:
-        job_db_id = insert_job_listing(job)
-        
-        if job_db_id and skills:
-            job.short_id = job_db_id
-            for skill_name in skills:
-                skill = Skill(
-                    job_id=job.job_id,
-                    short_id=job.short_id,
-                    source=job.source,
-                    skill_name=skill_name,
-                    skill_category='Requirement'
-                )
-                insert_skill(skill)
-        processed_count += 1
-        
-    logging.info(f"Scraping finished. {processed_count} jobs processed.")
-    return jobs_with_skills
+    jobs = scraper.scrape()
+    for job in jobs:
+        insert_job_listing(job)
+    logging.info(f"Scraping finished. {len(jobs)} jobs processed.")
+    return jobs
