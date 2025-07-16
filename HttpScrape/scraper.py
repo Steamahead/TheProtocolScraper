@@ -2,8 +2,12 @@ import logging
 import re
 from datetime import datetime
 from typing import List, Optional
-import requests
 from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
 
 # --- CORRECTED RELATIVE IMPORTS ---
 from .models import JobListing
@@ -17,6 +21,24 @@ class TheProtocolScraper(BaseScraper):
         super().__init__()
         self.base_url = "https://theprotocol.it"
         self.search_url = "https://theprotocol.it/filtry/big-data-science;sp/junior,assistant,trainee,mid;p/warszawa"
+
+    def get_page_html_with_selenium(self, url: str) -> str:
+        """Get HTML content from a URL using Selenium to handle dynamic content."""
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        
+        driver = webdriver.Chrome(options=chrome_options)
+        try:
+            driver.get(url)
+            # Wait for the job links to be present on the page
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'a[data-test="link-offer"]'))
+            )
+            return driver.page_source
+        finally:
+            driver.quit()
 
     def _parse_job_detail(self, html: str, job_url: str) -> Optional[JobListing]:
         """Parses the HTML of a single job listing page."""
@@ -52,16 +74,17 @@ class TheProtocolScraper(BaseScraper):
     def scrape(self) -> List[JobListing]:
         """Main scraping method for The Protocol."""
         self.logger.info(f"Fetching listings from {self.search_url}")
-        listings_html = self.get_page_html(self.search_url)
+        listings_html = self.get_page_html_with_selenium(self.search_url)
         if not listings_html:
             self.logger.error("Failed to fetch the main listings page.")
             return []
         soup = BeautifulSoup(listings_html, 'html.parser')
-        # --- CORRECTED CSS SELECTOR ---
         job_links = soup.select('a[data-test="link-offer"]')
         all_jobs = []
         for link_elem in job_links:
             job_url = self.base_url + link_elem['href']
+            # Since we are using selenium for the main page, we can use requests for the detail pages
+            # to avoid the overhead of creating a new browser instance for each job.
             detail_html = self.get_page_html(job_url)
             if detail_html:
                 job_listing = self._parse_job_detail(detail_html, job_url)
