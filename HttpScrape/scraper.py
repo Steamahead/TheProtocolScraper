@@ -56,9 +56,20 @@ class TheProtocolScraper(BaseScraper):
         if not listings_html:
             self.logger.error("Failed to fetch the main listings page.")
             return []
+
         soup = BeautifulSoup(listings_html, 'html.parser')
-        # --- CORRECTED CSS SELECTOR ---
+        # try the data-test selector first
         job_links = soup.select('a[data-test="link-offer"]')
+        if not job_links:
+            self.logger.warning(
+                "Primary selector `a[data-test=\"link-offer\"]` returned 0 links; falling back to href-based scan."
+            )
+            job_links = [
+                a for a in soup.find_all('a', href=True)
+                # adjust the pattern if your URLs change
+                if re.search(r'/oferta,', a['href'])
+            ]
+        
         all_jobs = []
         for link_elem in job_links:
             job_url = self.base_url + link_elem['href']
