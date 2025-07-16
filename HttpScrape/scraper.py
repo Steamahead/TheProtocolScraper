@@ -119,18 +119,17 @@ class TheProtocolScraper(BaseScraper):
         all_jobs: List[JobListing] = []
         page = 1
         while True:
-            # For page 1, use base search URL; subsequent pages append ?page=
-            page_url = self.search_url if page == 1 else f"{self.search_url}?page={page}"
-            self.logger.info(f"Fetching listing page {page} at {page_url}.")
+            page_url = f"{self.search_url}?page={page}"
+            self.logger.info(f"Fetching listing page {page}.")
             html = self._throttled_get(page_url)
             if not html:
-                self.logger.info(f"Failed or no HTML for page {page}, stopping pagination.")
+                self.logger.info(f"Failed or no HTML for page {page}, stopping.")
                 break
             soup = BeautifulSoup(html, 'html.parser')
             hrefs = [a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']]
             unique_hrefs = list(dict.fromkeys(hrefs))
             if not unique_hrefs:
-                self.logger.info(f"No job links on page {page}, ending pagination.")
+                self.logger.info(f"No job links on page {page}, ending.")
                 break
             self.logger.info(f"Page {page}: found {len(unique_hrefs)} listings.")
             # fetch details with ThreadPool but still throttling inside
@@ -138,14 +137,11 @@ class TheProtocolScraper(BaseScraper):
                 futures = {executor.submit(self._throttled_get, self.base_url + href): href for href in unique_hrefs}
                 for future in as_completed(futures):
                     href = futures[future]
-                    try:
-                        detail_html = future.result(timeout=self.max_delay + 5)
-                        if detail_html:
-                            job = self._parse_job_detail(detail_html, self.base_url + href)
-                            if job:
-                                all_jobs.append(job)
-                    except Exception as e:
-                        self.logger.warning(f"Failed to fetch or parse {href}: {e}")
+                    detail_html = future.result(timeout=self.max_delay + 5)
+                    if detail_html:
+                        job = self._parse_job_detail(detail_html, self.base_url + href)
+                        if job:
+                            all_jobs.append(job)
             page += 1
         self.logger.info(f"Scraping done: total {len(all_jobs)} jobs.")
         return all_jobs
