@@ -18,6 +18,8 @@ class TheProtocolScraper(BaseScraper):
         self.base_url = "https://theprotocol.it"
         self.search_url = (
             "https://theprotocol.it/filtry/big-data-science;"
+            "sp/junior,assistant,trainee,mid;p/warszawa;wp"
+        )
             "sp/junior,assistant,trainee,mid;p/warszawa"
         )
 
