@@ -11,68 +11,44 @@ from .database import insert_job_listing
 from .base_scraper import BaseScraper
 
 class TheProtocolScraper(BaseScraper):
-    """Scraper for theprotocol.it job board with pagination and unified numeric job IDs."""
+    """Scraper for theprotocol.it job board with precise Warsaw-only pagination."""
 
     def __init__(self):
         super().__init__()
         self.base_url = "https://theprotocol.it"
+        # Warsaw-only filter URL
         self.search_url = (
             "https://theprotocol.it/filtry/big-data-science;"
             "sp/junior,assistant,trainee,mid;p/warszawa;wp"
         )
+        # Number of listings per page as seen on site
+        self.page_size = 50
 
     def _parse_job_detail(self, html: str, job_url: str) -> Optional[JobListing]:
-        """Parses the HTML of a single job listing page and extracts fields."""
+        """Parses detail page HTML and returns a JobListing."""
         try:
             soup = BeautifulSoup(html, 'html.parser')
-            # Title
+            # Extract fields as before...
             title_elem = soup.select_one('h1[data-test="text-offerTitle"]')
             title = title_elem.get_text(strip=True) if title_elem else "N/A"
-            # Company
             company_elem = soup.select_one('a[data-test="anchor-company-link"]')
-            company = "N/A"
-            if company_elem:
-                full_text = company_elem.get_text(strip=True)
-                company = full_text.split(':')[-1].strip() if ':' in full_text else full_text
-            # Operating mode
-            mode_elem = soup.select_one('span[data-test="content-workModes"]')
-            operating_mode = mode_elem.get_text(strip=True) if mode_elem else "N/A"
-            # Location
-            location_elem = soup.select_one('span[data-test="text-primaryLocation"]')
-            location = location_elem.get_text(strip=True) if location_elem else "N/A"
-            # Work type and Employment type (extract bracket content)
-            work_type = "N/A"
-            contract_elem = soup.select_one('span[data-test="text-contractName"]')
-            if contract_elem:
-                bracket_match = re.search(r"\(([^)]+)\)", contract_elem.get_text())
-                work_type = bracket_match.group(1) if bracket_match else contract_elem.get_text(strip=True)
-            employment_type = work_type
-            # Experience level
-            exp_elem = soup.select_one('span[data-test="content-positionLevels"]')
-            experience_level = (
-                exp_elem.get_text(separator=", ", strip=True).replace('•', ',')
-                if exp_elem else "N/A"
-            )
-            # Salary
-            salary_min = salary_max = None
-            salary_elem = soup.select_one('span[data-test="text-contractSalary"]')
-            if salary_elem:
-                nums = re.findall(r"\d+", salary_elem.get_text())
-                if len(nums) >= 2:
-                    salary_min, salary_max = int(nums[0]), int(nums[1])
-                elif len(nums) == 1:
-                    salary_min = int(nums[0])
-
-            # Job ID: numeric ID if available, else UUID
-            job_id = None
+            company = company_elem.get_text(strip=True).split(':')[-1].strip() if company_elem else "N/A"
+            operating_mode = soup.select_one('span[data-test="content-workModes"]').get_text(strip=True) if soup.select_one('span[data-test="content-workModes"]') else "N/A"
+            location = soup.select_one('span[data-test="text-primaryLocation"]').get_text(strip=True) if soup.select_one('span[data-test="text-primaryLocation"]') else "N/A"
+            contract_text = soup.select_one('span[data-test="text-contractName"]').get_text(strip=True) if soup.select_one('span[data-test="text-contractName"]') else ""
+            work_type_match = re.search(r"\(([^)]+)\)", contract_text)
+            work_type = work_type_match.group(1) if work_type_match else contract_text or "N/A"
+            experience = soup.select_one('span[data-test="content-positionLevels"]').get_text(separator=", ", strip=True).replace('•', ',') if soup.select_one('span[data-test="content-positionLevels"]') else "N/A"
+            salary_nums = re.findall(r"\d+", soup.select_one('span[data-test="text-contractSalary"]').get_text()) if soup.select_one('span[data-test="text-contractSalary"]') else []
+            salary_min, salary_max = (int(salary_nums[0]), int(salary_nums[1])) if len(salary_nums) >= 2 else (int(salary_nums[0]), None) if salary_nums else (None, None)
             id_elem = soup.select_one('span[data-test="text-offerId"]')
             if id_elem and id_elem.get_text(strip=True).isdigit():
                 job_id = id_elem.get_text(strip=True)
             else:
-                uuid_match = re.search(r',oferta,([a-zA-Z0-9\-]+)', job_url)
-                job_id = uuid_match.group(1) if uuid_match else job_url
+                match = re.search(r',oferta,([a-zA-Z0-9\-]+)', job_url)
+                job_id = match.group(1) if match else job_url
 
-            job = JobListing(
+            return JobListing(
                 job_id=job_id,
                 source='theprotocol.it',
                 title=title,
@@ -83,63 +59,57 @@ class TheProtocolScraper(BaseScraper):
                 salary_max=salary_max,
                 location=location,
                 work_type=work_type,
-                experience_level=experience_level,
-                employment_type=employment_type,
+                experience_level=experience,
+                employment_type=work_type,
                 years_of_experience=None,
                 scrape_date=datetime.utcnow(),
                 listing_status='Active'
             )
-            self.logger.info(f"Parsed job {job_id}: {title}")
-            return job
         except Exception as e:
             self.logger.error(f"Error parsing detail {job_url}: {e}", exc_info=True)
             return None
 
     def scrape(self) -> List[JobListing]:
-        """Main scraping method: iterates through pagination until no more listings."""
-        self.logger.info("Starting pagination scrape.")
+        """Paginates through Warsaw-only listings until fewer than page_size results."""
+        self.logger.info("Starting Warsaw-only pagination scrape.")
         all_jobs: List[JobListing] = []
         page = 1
         while True:
-            url = f"{self.search_url}?page={page}"
-            self.logger.info(f"Fetching page {page}: {url}")
-            html = self.get_page_html(url)
+            page_url = f"{self.search_url}?page={page}"
+            self.logger.info(f"Fetching page {page}: {page_url}")
+            html = self.get_page_html(page_url)
             if not html:
-                self.logger.info(f"No HTML for page {page}, stopping.")
+                self.logger.info("No HTML returned; stopping.")
                 break
             soup = BeautifulSoup(html, 'html.parser')
-            links = [a for a in soup.find_all('a', href=True) if ',oferta,' in a['href']]
-            if not links:
-                self.logger.info(f"No listings on page {page}, done.")
+            hrefs = [a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']]
+            # dedupe
+            unique = list(dict.fromkeys(hrefs))
+            count = len(unique)
+            self.logger.info(f"Page {page}: found {count} Warsaw listings.")
+            if count == 0:
                 break
-            # Deduplicate by href
-            seen = set()
-            job_links = []
-            for a in links:
-                href = a['href']
-                if href not in seen:
-                    seen.add(href)
-                    job_links.append(a)
-            self.logger.info(f"Found {len(job_links)} job links on page {page}.")
-
-            for link_elem in job_links:
-                job_url = self.base_url + link_elem['href']
+            for href in unique:
+                job_url = self.base_url + href
                 detail_html = self.get_page_html(job_url)
                 if detail_html:
                     job = self._parse_job_detail(detail_html, job_url)
                     if job:
                         all_jobs.append(job)
+            # stop when last page (fewer than page_size)
+            if count < self.page_size:
+                self.logger.info(f"Last Warsaw page {page} has {count} listings; ending.")
+                break
             page += 1
-        self.logger.info(f"Scrape complete: {len(all_jobs)} jobs total.")
+        self.logger.info(f"Scrape complete: {len(all_jobs)} total jobs.")
         return all_jobs
 
 
 def run_scraper():
-    """Runs scraper and inserts into DB."""
     logging.info("Scraper started.")
     scraper = TheProtocolScraper()
     jobs = scraper.scrape()
     for job in jobs:
         insert_job_listing(job)
-    logging.info(f"Finished: {len(jobs)} jobs inserted.")
+    logging.info(f"Inserted {len(jobs)} jobs.")
     return jobs
