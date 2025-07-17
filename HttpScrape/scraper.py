@@ -20,8 +20,6 @@ class TheProtocolScraper(BaseScraper):
             "https://theprotocol.it/filtry/big-data-science;"
             "sp/junior,assistant,trainee,mid;p/warszawa;wp"
         )
-            "sp/junior,assistant,trainee,mid;p/warszawa"
-        )
 
     def _parse_job_detail(self, html: str, job_url: str) -> Optional[JobListing]:
         """Parses the HTML of a single job listing page and extracts fields."""
