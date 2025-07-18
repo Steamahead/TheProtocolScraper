@@ -1,7 +1,7 @@
 import logging
 import re
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Set
 import math
 import requests
 from bs4 import BeautifulSoup
@@ -27,114 +27,60 @@ class TheProtocolScraper(BaseScraper):
         self.page_size = 50
         self.max_pages = 10  # Safety limit
 
-    def _get_total_pages(self, html: str) -> int:
-        """Parses the total number of job offers to determine the number of pages."""
+    def _extract_job_urls_from_page(self, html: str) -> Set[str]:
+        """Extract unique job URLs from a page."""
         soup = BeautifulSoup(html, 'html.parser')
-        
-        # Try multiple selectors to find the total number of offers
-        selectors_to_try = [
-            'h2.results-header__title > span',
-            'h2.results-header__title span',
-            '.results-header__title > span',
-            '.results-header__title span',
-            'h2[class*="results"] span',
-            'span[class*="results"]',
-            '.results-count',
-            '[data-test*="results"]',
-            'h2 span'
-        ]
-        
-        for selector in selectors_to_try:
-            try:
-                total_offers_text = soup.select_one(selector)
-                if total_offers_text:
-                    text = total_offers_text.get_text(strip=True)
-                    self.logger.info(f"Found element with selector '{selector}': '{text}'")
-                    
-                    # Extract numbers from the text
-                    numbers = re.findall(r'\d+', text)
-                    if numbers:
-                        total_offers = int(numbers[0])
-                        if total_offers > 0:
-                            pages = math.ceil(total_offers / self.page_size)
-                            self.logger.info(f"Calculated {pages} pages from {total_offers} total offers")
-                            return min(pages, self.max_pages)
-            except Exception as e:
-                self.logger.debug(f"Selector '{selector}' failed: {e}")
-                continue
-        
-        # Try to find pagination elements
-        return self._get_pages_from_pagination(soup)
+        hrefs = {a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']}
+        return hrefs
 
-    def _get_pages_from_pagination(self, soup: BeautifulSoup) -> int:
-        """Try to determine total pages from pagination elements."""
-        try:
-            # Look for pagination links
-            pagination_selectors = [
-                '.pagination a',
-                '[class*="pagination"] a',
-                '[class*="pager"] a',
-                'a[href*="page="]',
-                'nav a[href*="page="]'
-            ]
+    def _detect_actual_pages(self) -> int:
+        """Detect the actual number of pages by checking for duplicate content."""
+        self.logger.info("Detecting actual number of pages by checking for unique content...")
+        
+        seen_urls: Set[str] = set()
+        page = 1
+        
+        while page <= self.max_pages:
+            page_url = f"{self.search_url}?page={page}"
+            self.logger.info(f"Testing page {page}: {page_url}")
             
-            max_page = 0
-            for selector in pagination_selectors:
-                links = soup.select(selector)
-                for link in links:
-                    href = link.get('href', '')
-                    page_match = re.search(r'page=(\d+)', href)
-                    if page_match:
-                        page_num = int(page_match.group(1))
-                        max_page = max(max_page, page_num)
-                        
-                    # Also check link text for page numbers
-                    text = link.get_text(strip=True)
-                    if text.isdigit():
-                        page_num = int(text)
-                        max_page = max(max_page, page_num)
+            html = self.get_page_html(page_url)
+            if not html:
+                self.logger.warning(f"Page {page} returned no content")
+                break
+                
+            current_urls = self._extract_job_urls_from_page(html)
             
-            if max_page > 0:
-                self.logger.info(f"Found {max_page} pages from pagination elements")
-                return min(max_page, self.max_pages)
-        except Exception as e:
-            self.logger.debug(f"Pagination detection failed: {e}")
+            if not current_urls:
+                self.logger.info(f"Page {page} has no job listings, stopping")
+                break
+            
+            # Check how many URLs are new vs already seen
+            new_urls = current_urls - seen_urls
+            duplicate_urls = current_urls & seen_urls
+            
+            self.logger.info(f"Page {page}: {len(current_urls)} total URLs, {len(new_urls)} new, {len(duplicate_urls)} duplicates")
+            
+            # If most URLs are duplicates, this page is likely repeating content
+            if len(duplicate_urls) > len(new_urls) and page > 1:
+                self.logger.info(f"Page {page} has mostly duplicate content, stopping at page {page-1}")
+                return page - 1
+            
+            # If we find fewer URLs than expected and it's not page 1, this might be the last page
+            if len(current_urls) < self.page_size and page > 1:
+                self.logger.info(f"Page {page} has {len(current_urls)} URLs (less than {self.page_size}), this is the last page")
+                seen_urls.update(new_urls)
+                return page
+            
+            seen_urls.update(new_urls)
+            page += 1
+            
+            # Add a small delay between requests
+            time.sleep(1)
         
-        # If we can't determine the total, try scraping a few pages
-        return self._detect_pages_by_testing()
-
-    def _detect_pages_by_testing(self) -> int:
-        """Test pages sequentially to find the actual number of pages."""
-        self.logger.info("Testing pages to find total count...")
-        
-        for page in range(1, self.max_pages + 1):
-            try:
-                test_url = f"{self.search_url}?page={page}"
-                html = self.get_page_html(test_url)
-                
-                if not html:
-                    self.logger.info(f"Page {page} returned no content, stopping at page {page-1}")
-                    return max(1, page - 1)
-                
-                soup = BeautifulSoup(html, 'html.parser')
-                hrefs = [a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']]
-                
-                if not hrefs:
-                    self.logger.info(f"Page {page} has no job listings, stopping at page {page-1}")
-                    return max(1, page - 1)
-                    
-                if len(hrefs) < self.page_size:
-                    self.logger.info(f"Page {page} has {len(hrefs)} listings (less than {self.page_size}), this is the last page")
-                    return page
-                    
-                self.logger.info(f"Page {page} has {len(hrefs)} listings, continuing...")
-                
-            except Exception as e:
-                self.logger.error(f"Error testing page {page}: {e}")
-                return max(1, page - 1)
-        
-        self.logger.warning(f"Reached maximum page limit ({self.max_pages})")
-        return self.max_pages
+        final_page = min(page - 1, self.max_pages)
+        self.logger.info(f"Detected {final_page} actual pages with {len(seen_urls)} unique job URLs")
+        return final_page
 
     def _parse_job_detail(self, html: str, job_url: str) -> Optional[JobListing]:
         try:
@@ -194,27 +140,20 @@ class TheProtocolScraper(BaseScraper):
             return None
 
     def scrape(self) -> List[JobListing]:
-        """Paginates Warsaw-only listings concurrently with improved page detection."""
-        self.logger.info("Starting Warsaw-only pagination scrape with concurrency.")
+        """Scrape job listings with proper duplicate detection between pages."""
+        self.logger.info("Starting Warsaw-only scrape with duplicate detection.")
         all_jobs: List[JobListing] = []
+        seen_urls: Set[str] = set()
 
-        # Get the total number of pages from the first page of results.
-        first_page_html = self.get_page_html(self.search_url)
-        if not first_page_html:
-            self.logger.error("Could not fetch the first page. Aborting scrape.")
-            return []
-
-        # Debug: log a snippet of the HTML to understand the structure
-        self.logger.info(f"First page HTML length: {len(first_page_html)}")
-        soup_debug = BeautifulSoup(first_page_html, 'html.parser')
-        h2_elements = soup_debug.find_all('h2')
-        for i, h2 in enumerate(h2_elements[:5]):  # Log first 5 h2 elements
-            self.logger.info(f"H2 element {i}: {h2.get_text(strip=True)[:100]}")
-
-        total_pages = self._get_total_pages(first_page_html)
+        # Detect the actual number of pages with unique content
+        total_pages = self._detect_actual_pages()
         self.logger.info(f"Total pages to scrape: {total_pages}")
 
-        # Loop through the known number of pages.
+        if total_pages == 0:
+            self.logger.warning("No pages detected, trying to scrape first page only")
+            total_pages = 1
+
+        # Loop through the actual number of pages
         for page in range(1, total_pages + 1):
             page_url = f"{self.search_url}?page={page}"
             self.logger.info(f"Fetching list page {page}/{total_pages}: {page_url}")
@@ -224,17 +163,28 @@ class TheProtocolScraper(BaseScraper):
                 self.logger.warning(f"No HTML for list page {page}, skipping.")
                 continue
 
-            soup = BeautifulSoup(html, 'html.parser')
-            hrefs = {a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']}
+            current_urls = self._extract_job_urls_from_page(html)
             
-            if not hrefs:
-                self.logger.warning(f"No listings found on page {page}. This might be the end.")
-                if page > 1:  # If it's not the first page, we can break
-                    break
+            if not current_urls:
+                self.logger.warning(f"No listings found on page {page}")
                 continue
 
-            tasks = [{"url": self.base_url + href} for href in hrefs]
-            self.logger.info(f"Page {page}: Found {len(tasks)} listings to process.")
+            # Filter out URLs we've already seen
+            new_urls = current_urls - seen_urls
+            duplicate_count = len(current_urls) - len(new_urls)
+            
+            self.logger.info(f"Page {page}: Found {len(current_urls)} total URLs, {len(new_urls)} new, {duplicate_count} duplicates")
+            
+            if not new_urls:
+                self.logger.info(f"Page {page} has no new URLs, stopping pagination")
+                break
+
+            # Add new URLs to seen set
+            seen_urls.update(new_urls)
+
+            # Process only new URLs
+            tasks = [{"url": self.base_url + href} for href in new_urls]
+            self.logger.info(f"Page {page}: Processing {len(tasks)} new listings.")
 
             with ThreadPoolExecutor(max_workers=8) as executor:
                 future_to_task = {executor.submit(self.get_page_html, task["url"]): task for task in tasks}
@@ -249,10 +199,10 @@ class TheProtocolScraper(BaseScraper):
                     except Exception as exc:
                         self.logger.error(f'{task["url"]} generated an exception: {exc}')
             
-            # A polite pause between fetching list pages.
+            # A polite pause between fetching list pages
             time.sleep(random.uniform(1, 2))
             
-        self.logger.info(f"Scrape complete: {len(all_jobs)} total jobs found.")
+        self.logger.info(f"Scrape complete: {len(all_jobs)} total unique jobs found.")
         return all_jobs
 
 
