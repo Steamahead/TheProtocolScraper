@@ -24,6 +24,16 @@ class TheProtocolScraper(BaseScraper):
         )
         self.page_size = 50  # listings per page
 
+    def _get_total_pages(self, html: str) -> int:
+        """Parses the total number of job offers to determine the number of pages."""
+        soup = BeautifulSoup(html, 'html.parser')
+        # This selector might need to be adjusted if the website structure changes.
+        total_offers_text = soup.select_one('h2.results-header__title > span')
+        if total_offers_text and total_offers_text.text.isdigit():
+            total_offers = int(total_offers_text.text)
+            return math.ceil(total_offers / self.page_size)
+        return 1 # Default to 1 page if the total can't be determined
+
     def _parse_job_detail(self, html: str, job_url: str) -> Optional[JobListing]:
         try:
             soup = BeautifulSoup(html, 'html.parser')
@@ -42,7 +52,7 @@ class TheProtocolScraper(BaseScraper):
             exp_elem = soup.select_one('span[data-test="content-positionLevels"]')
             experience = exp_elem.get_text(separator=", ", strip=True).replace('•', ',') if exp_elem else "N/A"
             salary_elem = soup.select_one('span[data-test="text-contractSalary"]')
-            nums = re.findall(r"\d+", salary_elem.get_text()) if salary_elem else []
+            nums = re.findall(r"\d+", salary_elem.get_text().replace(" ", "")) if salary_elem else []
             if len(nums) >= 2:
                 salary_min, salary_max = int(nums[0]), int(nums[1])
             elif nums:
@@ -78,35 +88,45 @@ class TheProtocolScraper(BaseScraper):
             return None
 
     def scrape(self) -> List[JobListing]:
-        """Paginates Warsaw-only listings, stopping when fewer than a full page."""
+        """Paginates Warsaw-only listings, stopping when the last page is reached."""
         self.logger.info("Starting Warsaw-only pagination scrape.")
         all_jobs: List[JobListing] = []
-        page = 1
-        while True:
+
+        # First, get the total number of pages
+        first_page_html = self.get_page_html(self.search_url)
+        if not first_page_html:
+            self.logger.error("Could not fetch the first page. Aborting scrape.")
+            return []
+        
+        total_pages = self._get_total_pages(first_page_html)
+        self.logger.info(f"Total pages to scrape: {total_pages}")
+
+        for page in range(1, total_pages + 1):
             page_url = f"{self.search_url}?page={page}"
-            self.logger.info(f"Fetching page {page}: {page_url}")
+            self.logger.info(f"Fetching page {page}/{total_pages}: {page_url}")
             html = self.get_page_html(page_url)
             if not html:
                 self.logger.warning(f"No HTML for page {page}, stopping.")
                 break
+
             soup = BeautifulSoup(html, 'html.parser')
-            hrefs = [a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']]
-            unique = list(dict.fromkeys(hrefs))
-            count = len(unique)
-            self.logger.info(f"Page {page}: {count} listings.")
-            if count == 0:
+            # The selector for the links to job offers
+            hrefs = [a['href'] for a in soup.select('a[href*=",oferta,"]')]
+            unique_hrefs = list(dict.fromkeys(hrefs))
+            self.logger.info(f"Page {page}: Found {len(unique_hrefs)} unique listings.")
+
+            if not unique_hrefs:
+                self.logger.info(f"No listings found on page {page}. Ending scrape.")
                 break
-            for href in unique:
+
+            for href in unique_hrefs:
                 job_url = self.base_url + href
                 detail_html = self.get_page_html(job_url)
                 if detail_html:
                     job = self._parse_job_detail(detail_html, job_url)
                     if job:
                         all_jobs.append(job)
-            if count < self.page_size:
-                self.logger.info(f"Last page {page} with {count} listings; ending.")
-                break
-            page += 1
+
         self.logger.info(f"Scrape complete: {len(all_jobs)} jobs.")
         return all_jobs
 
