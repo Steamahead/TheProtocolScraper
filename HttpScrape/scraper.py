@@ -31,21 +31,30 @@ class TheProtocolScraper(BaseScraper):
             title = title_elem.get_text(strip=True) if title_elem else "N/A"
             company_elem = soup.select_one('a[data-test="anchor-company-link"]')
             company = company_elem.get_text(strip=True).split(':')[-1].strip() if company_elem else "N/A"
-            operating_mode = soup.select_one('span[data-test="content-workModes"]').get_text(strip=True) if soup.select_one('span[data-test="content-workModes"]') else "N/A"
-            location = soup.select_one('span[data-test="text-primaryLocation"]').get_text(strip=True) if soup.select_one('span[data-test="text-primaryLocation"]') else "N/A"
-            contract_text = soup.select_one('span[data-test="text-contractName"]').get_text(strip=True) if soup.select_one('span[data-test="text-contractName"]') else ""
-            work_type_match = re.search(r"\(([^)]+)\)", contract_text)
-            work_type = work_type_match.group(1) if work_type_match else contract_text or "N/A"
-            experience = soup.select_one('span[data-test="content-positionLevels"]').get_text(separator=", ", strip=True).replace('•', ',') if soup.select_one('span[data-test="content-positionLevels"]') else "N/A"
+            mode = soup.select_one('span[data-test="content-workModes"]')
+            operating_mode = mode.get_text(strip=True) if mode else "N/A"
+            loc = soup.select_one('span[data-test="text-primaryLocation"]')
+            location = loc.get_text(strip=True) if loc else "N/A"
+            contract_elem = soup.select_one('span[data-test="text-contractName"]')
+            contract_text = contract_elem.get_text(strip=True) if contract_elem else ""
+            m = re.search(r"\(([^)]+)\)", contract_text)
+            work_type = m.group(1) if m else contract_text or "N/A"
+            experience_elem = soup.select_one('span[data-test="content-positionLevels"]')
+            experience = experience_elem.get_text(separator=", ", strip=True).replace('•', ',') if experience_elem else "N/A"
             salary_elem = soup.select_one('span[data-test="text-contractSalary"]')
             nums = re.findall(r"\d+", salary_elem.get_text()) if salary_elem else []
-            salary_min, salary_max = (int(nums[0]), int(nums[1])) if len(nums) >= 2 else (int(nums[0]), None) if nums else (None, None)
+            if len(nums) >= 2:
+                salary_min, salary_max = int(nums[0]), int(nums[1])
+            elif nums:
+                salary_min, salary_max = int(nums[0]), None
+            else:
+                salary_min = salary_max = None
             id_elem = soup.select_one('span[data-test="text-offerId"]')
             if id_elem and id_elem.get_text(strip=True).isdigit():
                 job_id = id_elem.get_text(strip=True)
             else:
-                uuid_match = re.search(r',oferta,([a-zA-Z0-9\-]+)', job_url)
-                job_id = uuid_match.group(1) if uuid_match else job_url
+                uuid_m = re.search(r',oferta,([a-zA-Z0-9\-]+)', job_url)
+                job_id = uuid_m.group(1) if uuid_m else job_url
 
             return JobListing(
                 job_id=job_id,
@@ -69,24 +78,32 @@ class TheProtocolScraper(BaseScraper):
             return None
 
     def scrape(self) -> List[JobListing]:
-        """Scrapes all Warsaw-only pages based on total count from page 1."""
+        """Scrapes all Warsaw-only pages based on total count from page 1, with debug fallback for total."""
         self.logger.info("Starting Warsaw-only scrape based on total count.")
         all_jobs: List[JobListing] = []
 
-        # Fetch page 1 to get total
+        # Fetch page 1 to get total count
         first_page_url = f"{self.search_url}?page=1"
         first_html = self.get_page_html(first_page_url)
         if not first_html:
             self.logger.error("Failed to fetch first page.")
             return all_jobs
-        # Extract total offers: 'Wyniki (143 oferty)'
-        total_match = re.search(r"Wyniki \((\d+)", first_html)
-        total = int(total_match.group(1)) if total_match else None
+        # Parse total offers: try DOM first, then regex
+        soup_first = BeautifulSoup(first_html, 'html.parser')
+        text_node = soup_first.find(string=re.compile(r"Wyniki \(\d+"))
+        if text_node:
+            total = int(re.search(r"(\d+)", text_node).group(1))
+            self.logger.info(f"Total offers parsed from page text: {total}")
+        else:
+            self.logger.debug("First-page HTML snippet for debugging total count:\n" + first_html[:500])
+            self.logger.warning("Could not find total via DOM; falling back to regex.")
+            match = re.search(r"Wyniki \((\d+)\)", first_html)
+            total = int(match.group(1)) if match else None
         if total:
             pages = math.ceil(total / self.page_size)
             self.logger.info(f"Total offers: {total}, pages: {pages}")
         else:
-            self.logger.warning("Could not parse total; defaulting to single page.")
+            self.logger.warning("Could not determine total; defaulting to single page.")
             pages = 1
 
         # Iterate pages
