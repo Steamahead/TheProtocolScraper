@@ -77,37 +77,12 @@ class TheProtocolScraper(BaseScraper):
             self.logger.error(f"Error parsing detail {job_url}: {e}", exc_info=True)
             return None
 
-    def scrape(self) -> List[JobListing]:
-        """Scrapes all Warsaw-only pages based on total count from page 1, with debug fallback for total."""
-        self.logger.info("Starting Warsaw-only scrape based on total count.")
+        def scrape(self) -> List[JobListing]:
+        """Paginates Warsaw-only listings, stopping when <page_size listings encountered."""
+        self.logger.info("Starting Warsaw-only pagination scrape.")
         all_jobs: List[JobListing] = []
-
-        # Fetch page 1 to get total count
-        first_page_url = f"{self.search_url}?page=1"
-        first_html = self.get_page_html(first_page_url)
-        if not first_html:
-            self.logger.error("Failed to fetch first page.")
-            return all_jobs
-        # Parse total offers: try DOM first, then regex
-        soup_first = BeautifulSoup(first_html, 'html.parser')
-        text_node = soup_first.find(string=re.compile(r"Wyniki \(\d+"))
-        if text_node:
-            total = int(re.search(r"(\d+)", text_node).group(1))
-            self.logger.info(f"Total offers parsed from page text: {total}")
-        else:
-            self.logger.debug("First-page HTML snippet for debugging total count:\n" + first_html[:500])
-            self.logger.warning("Could not find total via DOM; falling back to regex.")
-            match = re.search(r"Wyniki \((\d+)\)", first_html)
-            total = int(match.group(1)) if match else None
-        if total:
-            pages = math.ceil(total / self.page_size)
-            self.logger.info(f"Total offers: {total}, pages: {pages}")
-        else:
-            self.logger.warning("Could not determine total; defaulting to single page.")
-            pages = 1
-
-        # Iterate pages
-        for page in range(1, pages + 1):
+        page = 1
+        while True:
             page_url = f"{self.search_url}?page={page}"
             self.logger.info(f"Fetching page {page}: {page_url}")
             html = self.get_page_html(page_url)
@@ -117,7 +92,10 @@ class TheProtocolScraper(BaseScraper):
             soup = BeautifulSoup(html, 'html.parser')
             hrefs = [a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']]
             unique = list(dict.fromkeys(hrefs))
-            self.logger.info(f"Page {page}: {len(unique)} listings.")
+            count = len(unique)
+            self.logger.info(f"Page {page}: {count} listings.")
+            if count == 0:
+                break
             for href in unique:
                 job_url = self.base_url + href
                 detail_html = self.get_page_html(job_url)
@@ -125,7 +103,11 @@ class TheProtocolScraper(BaseScraper):
                     job = self._parse_job_detail(detail_html, job_url)
                     if job:
                         all_jobs.append(job)
-
+            # stop when fewer than a full page
+            if count < self.page_size:
+                self.logger.info(f"Last page {page} with {count} listings; ending.")
+                break
+            page += 1
         self.logger.info(f"Scrape complete: {len(all_jobs)} jobs.")
         return all_jobs
 
