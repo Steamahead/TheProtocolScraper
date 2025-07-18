@@ -12,7 +12,7 @@ from .database import insert_job_listing
 from .base_scraper import BaseScraper
 
 class TheProtocolScraper(BaseScraper):
-    """Scraper for theprotocol.it job board with dynamic Warsaw-only pagination based on total count."""
+    """Scraper for theprotocol.it job board with dynamic Warsaw-only pagination."""
 
     def __init__(self):
         super().__init__()
@@ -31,16 +31,16 @@ class TheProtocolScraper(BaseScraper):
             title = title_elem.get_text(strip=True) if title_elem else "N/A"
             company_elem = soup.select_one('a[data-test="anchor-company-link"]')
             company = company_elem.get_text(strip=True).split(':')[-1].strip() if company_elem else "N/A"
-            mode = soup.select_one('span[data-test="content-workModes"]')
-            operating_mode = mode.get_text(strip=True) if mode else "N/A"
-            loc = soup.select_one('span[data-test="text-primaryLocation"]')
-            location = loc.get_text(strip=True) if loc else "N/A"
+            mode_elem = soup.select_one('span[data-test="content-workModes"]')
+            operating_mode = mode_elem.get_text(strip=True) if mode_elem else "N/A"
+            loc_elem = soup.select_one('span[data-test="text-primaryLocation"]')
+            location = loc_elem.get_text(strip=True) if loc_elem else "N/A"
             contract_elem = soup.select_one('span[data-test="text-contractName"]')
             contract_text = contract_elem.get_text(strip=True) if contract_elem else ""
             m = re.search(r"\(([^)]+)\)", contract_text)
             work_type = m.group(1) if m else contract_text or "N/A"
-            experience_elem = soup.select_one('span[data-test="content-positionLevels"]')
-            experience = experience_elem.get_text(separator=", ", strip=True).replace('•', ',') if experience_elem else "N/A"
+            exp_elem = soup.select_one('span[data-test="content-positionLevels"]')
+            experience = exp_elem.get_text(separator=", ", strip=True).replace('•', ',') if exp_elem else "N/A"
             salary_elem = soup.select_one('span[data-test="text-contractSalary"]')
             nums = re.findall(r"\d+", salary_elem.get_text()) if salary_elem else []
             if len(nums) >= 2:
@@ -77,8 +77,8 @@ class TheProtocolScraper(BaseScraper):
             self.logger.error(f"Error parsing detail {job_url}: {e}", exc_info=True)
             return None
 
-        def scrape(self) -> List[JobListing]:
-        """Paginates Warsaw-only listings, stopping when <page_size listings encountered."""
+    def scrape(self) -> List[JobListing]:
+        """Paginates Warsaw-only listings, stopping when fewer than a full page."""
         self.logger.info("Starting Warsaw-only pagination scrape.")
         all_jobs: List[JobListing] = []
         page = 1
@@ -103,7 +103,6 @@ class TheProtocolScraper(BaseScraper):
                     job = self._parse_job_detail(detail_html, job_url)
                     if job:
                         all_jobs.append(job)
-            # stop when fewer than a full page
             if count < self.page_size:
                 self.logger.info(f"Last page {page} with {count} listings; ending.")
                 break
