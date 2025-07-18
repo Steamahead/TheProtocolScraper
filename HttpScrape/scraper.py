@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import random
-import urllib.parse
+import json
 
 # --- Corrected relative imports ---
 from .models import JobListing
@@ -28,70 +28,29 @@ class TheProtocolScraper(BaseScraper):
         self.page_size = 50
         self.max_pages = 10  # Safety limit
 
-    def _investigate_pagination_format(self, html: str) -> List[str]:
-        """Investigate how pagination works on this website."""
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        # Look for pagination links
-        pagination_links = []
-        
-        # Common pagination selectors
-        pagination_selectors = [
-            'a[href*="page"]',
-            '.pagination a',
-            '.pager a',
-            'nav a',
-            'a[class*="page"]',
-            'a[class*="next"]',
-            'a[href*="stron"]',  # Polish word for page
-            'a[href*=";page"]',
-            'a[href*="/page/"]',
-            'a[href*="-page-"]'
-        ]
-        
-        for selector in pagination_selectors:
-            links = soup.select(selector)
-            for link in links:
-                href = link.get('href', '')
-                text = link.get_text(strip=True)
-                if href and ('page' in href.lower() or 'stron' in href.lower() or text.isdigit()):
-                    pagination_links.append(f"Text: '{text}' -> URL: '{href}'")
-        
-        # Also look for any form elements that might handle pagination
-        forms = soup.find_all('form')
-        for form in forms:
-            action = form.get('action', '')
-            method = form.get('method', 'GET').upper()
-            inputs = form.find_all('input')
-            if inputs:
-                pagination_links.append(f"FORM {method} -> {action} with {len(inputs)} inputs")
-        
-        # Look for JavaScript pagination clues
-        scripts = soup.find_all('script')
-        for script in scripts:
-            script_text = script.get_text()
-            if 'page' in script_text.lower() and ('next' in script_text.lower() or 'pagination' in script_text.lower()):
-                # Extract relevant parts
-                lines = [line.strip() for line in script_text.split('\n') if 'page' in line.lower()][:3]
-                if lines:
-                    pagination_links.append(f"JS: {'; '.join(lines)}")
-        
-        return pagination_links
-
-    def _try_different_pagination_formats(self, base_url: str, page_num: int) -> List[str]:
-        """Try different pagination URL formats."""
-        formats = [
-            f"{base_url}?page={page_num}",
-            f"{base_url};page/{page_num}",
-            f"{base_url}/page/{page_num}",
-            f"{base_url}?p={page_num}",
-            f"{base_url};p/{page_num}",
-            f"{base_url}?strona={page_num}",  # Polish for page
-            f"{base_url};strona/{page_num}",
-            f"{base_url}-page-{page_num}",
-            f"{base_url}/strona/{page_num}",
-        ]
-        return formats
+    def _extract_pagination_from_json(self, html: str) -> Optional[int]:
+        """Extract pagination info from the JSON data in the page."""
+        try:
+            # Look for the JSON data that contains pagination info
+            pattern = r'"page":\s*\{\s*"number":\s*\d+,\s*"size":\s*\d+,\s*"count":\s*(\d+)\s*\}'
+            match = re.search(pattern, html)
+            if match:
+                page_count = int(match.group(1))
+                self.logger.info(f"Found page count from JSON: {page_count}")
+                return page_count
+            
+            # Alternative pattern
+            pattern2 = r'"count":\s*(\d+).*?"offersCount":\s*(\d+)'
+            match2 = re.search(pattern2, html)
+            if match2:
+                page_count = int(match2.group(1))
+                total_offers = int(match2.group(2))
+                self.logger.info(f"Found page count: {page_count}, total offers: {total_offers}")
+                return page_count
+                
+        except Exception as e:
+            self.logger.debug(f"Could not extract pagination from JSON: {e}")
+        return None
 
     def _extract_job_urls_from_page(self, html: str) -> Set[str]:
         """Extract unique job URLs from a page."""
@@ -103,22 +62,38 @@ class TheProtocolScraper(BaseScraper):
         """Find the correct pagination format and number of pages."""
         self.logger.info("Investigating pagination format...")
         
-        # Get first page and investigate pagination
+        # Get first page and check for JSON pagination info
         first_page_html = self.get_page_html(self.search_url)
         if not first_page_html:
             return "", 0
         
+        # Try to get page count from JSON first
+        json_page_count = self._extract_pagination_from_json(first_page_html)
+        if json_page_count:
+            self.logger.info(f"Using page count from JSON: {json_page_count}")
+            # Test if the -page- format works
+            test_url = f"{self.search_url}-page-2"
+            test_html = self.get_page_html(test_url)
+            if test_html:
+                first_urls = self._extract_job_urls_from_page(first_page_html)
+                test_urls = self._extract_job_urls_from_page(test_html)
+                new_urls = test_urls - first_urls
+                if len(new_urls) > 0:
+                    self.logger.info(f"Confirmed -page- format works with {len(new_urls)} new URLs on page 2")
+                    return f"{self.search_url}-page-{{page}}", json_page_count
+        
         first_page_urls = self._extract_job_urls_from_page(first_page_html)
         self.logger.info(f"First page has {len(first_page_urls)} job URLs")
         
-        # Investigate pagination structure
-        pagination_info = self._investigate_pagination_format(first_page_html)
-        self.logger.info("Pagination investigation results:")
-        for info in pagination_info[:10]:  # Log first 10 findings
-            self.logger.info(f"  {info}")
-        
         # Try different pagination formats for page 2
-        formats_to_try = self._try_different_pagination_formats(self.search_url, 2)
+        formats_to_try = [
+            f"{self.search_url}-page-2",
+            f"{self.search_url}?page=2",
+            f"{self.search_url};page/2",
+            f"{self.search_url}/page/2",
+            f"{self.search_url}?p=2",
+            f"{self.search_url};p/2",
+        ]
         
         for format_url in formats_to_try:
             self.logger.info(f"Testing pagination format: {format_url}")
@@ -131,20 +106,22 @@ class TheProtocolScraper(BaseScraper):
                 self.logger.info(f"  Found {len(current_urls)} URLs, {len(new_urls)} new ones")
                 
                 if len(new_urls) > 0:
-                    self.logger.info(f"  SUCCESS! Found working pagination format: {format_url}")
-                    # Now find total pages with this format
-                    total_pages = self._count_pages_with_format(format_url.replace("2", "{page}"))
-                    return format_url.replace("2", "{page}"), total_pages
+                    self.logger.info(f"  SUCCESS! Found working pagination format")
+                    # Extract the template from the working URL
+                    template = format_url.replace("2", "{page}")
+                    # Count pages manually since we found a working format
+                    total_pages = self._count_pages_manually(template, first_page_urls)
+                    return template, total_pages
             
             time.sleep(1)  # Be polite between requests
         
         self.logger.warning("No working pagination format found, defaulting to single page")
         return "", 1
 
-    def _count_pages_with_format(self, url_template: str) -> int:
-        """Count pages using the detected URL format."""
-        seen_urls: Set[str] = set()
-        page = 1
+    def _count_pages_manually(self, url_template: str, first_page_urls: Set[str]) -> int:
+        """Count pages by testing each one manually."""
+        seen_urls = first_page_urls.copy()
+        page = 2  # Start from page 2 since we already have page 1 data
         
         while page <= self.max_pages:
             page_url = url_template.format(page=page)
@@ -152,21 +129,25 @@ class TheProtocolScraper(BaseScraper):
             
             html = self.get_page_html(page_url)
             if not html:
-                break
+                self.logger.info(f"Page {page} returned no content, stopping at page {page-1}")
+                return page - 1
                 
             current_urls = self._extract_job_urls_from_page(html)
             
             if not current_urls:
-                self.logger.info(f"Page {page} has no job listings")
-                break
+                self.logger.info(f"Page {page} has no job listings, stopping at page {page-1}")
+                return page - 1
             
             new_urls = current_urls - seen_urls
             
-            if len(new_urls) == 0 and page > 1:
+            self.logger.info(f"Page {page}: {len(current_urls)} total URLs, {len(new_urls)} new URLs")
+            
+            if len(new_urls) == 0:
                 self.logger.info(f"Page {page} has no new URLs, stopping at page {page-1}")
                 return page - 1
             
-            if len(current_urls) < self.page_size and page > 1:
+            # If this page has fewer items than the page size, it's likely the last page
+            if len(current_urls) < self.page_size:
                 self.logger.info(f"Page {page} has {len(current_urls)} URLs (less than {self.page_size}), this is the last page")
                 return page
             
@@ -242,20 +223,19 @@ class TheProtocolScraper(BaseScraper):
         # Detect the correct pagination format and page count
         url_template, total_pages = self._detect_working_pagination_format()
         
-        if not url_template:
-            # Fallback to single page
-            self.logger.info("Using single page fallback")
-            url_template = self.search_url
-            total_pages = 1
-        
         self.logger.info(f"Using URL template: {url_template}")
         self.logger.info(f"Total pages to scrape: {total_pages}")
 
         # Loop through the pages
         for page in range(1, total_pages + 1):
-            if url_template == self.search_url:
-                page_url = self.search_url  # Single page
+            if not url_template:
+                # Fallback to single page
+                page_url = self.search_url
+            elif page == 1:
+                # For page 1, use the original URL without the page suffix
+                page_url = self.search_url
             else:
+                # For pages 2+, use the template
                 page_url = url_template.format(page=page)
             
             self.logger.info(f"Fetching list page {page}/{total_pages}: {page_url}")
