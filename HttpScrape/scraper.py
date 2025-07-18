@@ -39,13 +39,13 @@ class TheProtocolScraper(BaseScraper):
                 self.logger.info(f"Found page count from JSON: {page_count}")
                 return page_count
             
-            # Alternative pattern
-            pattern2 = r'"count":\s*(\d+).*?"offersCount":\s*(\d+)'
+            # Alternative pattern for total offers
+            pattern2 = r'"offersCount":\s*(\d+)'
             match2 = re.search(pattern2, html)
             if match2:
-                page_count = int(match2.group(1))
-                total_offers = int(match2.group(2))
-                self.logger.info(f"Found page count: {page_count}, total offers: {total_offers}")
+                total_offers = int(match2.group(1))
+                page_count = math.ceil(total_offers / self.page_size)
+                self.logger.info(f"Found total offers: {total_offers}, calculated pages: {page_count}")
                 return page_count
                 
         except Exception as e:
@@ -58,104 +58,120 @@ class TheProtocolScraper(BaseScraper):
         hrefs = {a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']}
         return hrefs
 
-    def _detect_working_pagination_format(self) -> tuple[str, int]:
-        """Find the correct pagination format and number of pages."""
-        self.logger.info("Investigating pagination format...")
+    def _debug_page_content(self, page_num: int, html: str, urls: Set[str]):
+        """Debug helper to log page content details."""
+        # Extract some job titles for debugging
+        soup = BeautifulSoup(html, 'html.parser')
         
-        # Get first page and check for JSON pagination info
-        first_page_html = self.get_page_html(self.search_url)
-        if not first_page_html:
-            return "", 0
-        
-        # Try to get page count from JSON first
-        json_page_count = self._extract_pagination_from_json(first_page_html)
-        if json_page_count:
-            self.logger.info(f"Using page count from JSON: {json_page_count}")
-            # Test if the -page- format works
-            test_url = f"{self.search_url}-page-2"
-            test_html = self.get_page_html(test_url)
-            if test_html:
-                first_urls = self._extract_job_urls_from_page(first_page_html)
-                test_urls = self._extract_job_urls_from_page(test_html)
-                new_urls = test_urls - first_urls
-                if len(new_urls) > 0:
-                    self.logger.info(f"Confirmed -page- format works with {len(new_urls)} new URLs on page 2")
-                    return f"{self.search_url}-page-{{page}}", json_page_count
-        
-        first_page_urls = self._extract_job_urls_from_page(first_page_html)
-        self.logger.info(f"First page has {len(first_page_urls)} job URLs")
-        
-        # Try different pagination formats for page 2
-        formats_to_try = [
-            f"{self.search_url}-page-2",
-            f"{self.search_url}?page=2",
-            f"{self.search_url};page/2",
-            f"{self.search_url}/page/2",
-            f"{self.search_url}?p=2",
-            f"{self.search_url};p/2",
+        # Look for job titles in various possible selectors
+        title_selectors = [
+            'h3[data-test="text-offerTitle"]',
+            'h2[data-test="text-offerTitle"]', 
+            'a[data-test="anchor-offer-title"]',
+            '.offer-title',
+            'h3 a',
+            'h2 a'
         ]
         
-        for format_url in formats_to_try:
-            self.logger.info(f"Testing pagination format: {format_url}")
-            
-            html = self.get_page_html(format_url)
-            if html:
-                current_urls = self._extract_job_urls_from_page(html)
-                new_urls = current_urls - first_page_urls
-                
-                self.logger.info(f"  Found {len(current_urls)} URLs, {len(new_urls)} new ones")
-                
-                if len(new_urls) > 0:
-                    self.logger.info(f"  SUCCESS! Found working pagination format")
-                    # Extract the template from the working URL
-                    template = format_url.replace("2", "{page}")
-                    # Count pages manually since we found a working format
-                    total_pages = self._count_pages_manually(template, first_page_urls)
-                    return template, total_pages
-            
-            time.sleep(1)  # Be polite between requests
+        titles = []
+        for selector in title_selectors:
+            elements = soup.select(selector)
+            for elem in elements[:3]:  # First 3 titles
+                title = elem.get_text(strip=True)
+                if title and len(title) > 10:  # Valid title
+                    titles.append(title[:50])  # Truncate long titles
+            if titles:
+                break
         
-        self.logger.warning("No working pagination format found, defaulting to single page")
-        return "", 1
+        self.logger.info(f"Page {page_num} debug - URLs: {len(urls)}, Sample titles: {titles[:3]}")
+        
+        # Log first few URL patterns for debugging
+        url_samples = list(urls)[:3]
+        self.logger.info(f"Page {page_num} sample URLs: {url_samples}")
 
-    def _count_pages_manually(self, url_template: str, first_page_urls: Set[str]) -> int:
-        """Count pages by testing each one manually."""
-        seen_urls = first_page_urls.copy()
-        page = 2  # Start from page 2 since we already have page 1 data
-        
-        while page <= self.max_pages:
-            page_url = url_template.format(page=page)
-            self.logger.info(f"Testing page {page}: {page_url}")
+    def scrape(self) -> List[JobListing]:
+        """Scrape job listings with improved pagination handling."""
+        self.logger.info("Starting Warsaw-only scrape with improved pagination detection.")
+        all_jobs: List[JobListing] = []
+        seen_urls: Set[str] = set()
+
+        # First, get the expected page count from the first page
+        first_page_html = self.get_page_html(self.search_url)
+        if not first_page_html:
+            self.logger.error("Could not fetch the first page. Aborting scrape.")
+            return []
+
+        expected_pages = self._extract_pagination_from_json(first_page_html)
+        if not expected_pages:
+            expected_pages = 4  # Fallback based on your observation
+
+        self.logger.info(f"Expected pages to scrape: {expected_pages}")
+
+        # Process each page, regardless of duplicate detection issues
+        for page in range(1, expected_pages + 1):
+            if page == 1:
+                page_url = self.search_url
+            else:
+                page_url = f"{self.search_url}-page-{page}"
+            
+            self.logger.info(f"Fetching list page {page}/{expected_pages}: {page_url}")
+            
+            # Add some randomization to avoid being blocked
+            time.sleep(random.uniform(2, 4))
             
             html = self.get_page_html(page_url)
+            
             if not html:
-                self.logger.info(f"Page {page} returned no content, stopping at page {page-1}")
-                return page - 1
-                
+                self.logger.warning(f"No HTML for list page {page}, skipping.")
+                continue
+
             current_urls = self._extract_job_urls_from_page(html)
             
             if not current_urls:
-                self.logger.info(f"Page {page} has no job listings, stopping at page {page-1}")
-                return page - 1
-            
+                self.logger.warning(f"No listings found on page {page}")
+                # Don't break here, continue to next page
+                continue
+
+            # Debug the page content
+            self._debug_page_content(page, html, current_urls)
+
+            # Filter out URLs we've already seen
             new_urls = current_urls - seen_urls
+            duplicate_count = len(current_urls) - len(new_urls)
             
-            self.logger.info(f"Page {page}: {len(current_urls)} total URLs, {len(new_urls)} new URLs")
+            self.logger.info(f"Page {page}: Found {len(current_urls)} total URLs, {len(new_urls)} new, {duplicate_count} duplicates")
             
-            if len(new_urls) == 0:
-                self.logger.info(f"Page {page} has no new URLs, stopping at page {page-1}")
-                return page - 1
-            
-            # If this page has fewer items than the page size, it's likely the last page
-            if len(current_urls) < self.page_size:
-                self.logger.info(f"Page {page} has {len(current_urls)} URLs (less than {self.page_size}), this is the last page")
-                return page
-            
+            # Don't stop even if no new URLs - continue to check remaining pages
+            if not new_urls:
+                self.logger.warning(f"Page {page} has no new URLs, but continuing to check remaining pages...")
+                continue
+
+            # Add new URLs to seen set
             seen_urls.update(new_urls)
-            page += 1
-            time.sleep(1)
+
+            # Process only new URLs
+            tasks = [{"url": self.base_url + href} for href in new_urls]
+            self.logger.info(f"Page {page}: Processing {len(tasks)} new listings.")
+
+            with ThreadPoolExecutor(max_workers=6) as executor:  # Reduced concurrency
+                future_to_task = {executor.submit(self.get_page_html, task["url"]): task for task in tasks}
+                for future in as_completed(future_to_task):
+                    task = future_to_task[future]
+                    try:
+                        detail_html = future.result()
+                        if detail_html:
+                            job = self._parse_job_detail(detail_html, task["url"])
+                            if job:
+                                all_jobs.append(job)
+                    except Exception as exc:
+                        self.logger.error(f'{task["url"]} generated an exception: {exc}')
+            
+            self.logger.info(f"Page {page} complete. Total unique jobs so far: {len(all_jobs)}")
+            
+        self.logger.info(f"Scrape complete: {len(all_jobs)} total unique jobs found across {expected_pages} pages.")
+        self.logger.info(f"Total unique URLs collected: {len(seen_urls)}")
         
-        return min(page - 1, self.max_pages)
+        return all_jobs
 
     def _parse_job_detail(self, html: str, job_url: str) -> Optional[JobListing]:
         try:
@@ -213,79 +229,6 @@ class TheProtocolScraper(BaseScraper):
         except Exception as e:
             self.logger.error(f"Error parsing detail {job_url}: {e}", exc_info=True)
             return None
-
-    def scrape(self) -> List[JobListing]:
-        """Scrape job listings with automatic pagination format detection."""
-        self.logger.info("Starting Warsaw-only scrape with pagination format detection.")
-        all_jobs: List[JobListing] = []
-        seen_urls: Set[str] = set()
-
-        # Detect the correct pagination format and page count
-        url_template, total_pages = self._detect_working_pagination_format()
-        
-        self.logger.info(f"Using URL template: {url_template}")
-        self.logger.info(f"Total pages to scrape: {total_pages}")
-
-        # Loop through the pages
-        for page in range(1, total_pages + 1):
-            if not url_template:
-                # Fallback to single page
-                page_url = self.search_url
-            elif page == 1:
-                # For page 1, use the original URL without the page suffix
-                page_url = self.search_url
-            else:
-                # For pages 2+, use the template
-                page_url = url_template.format(page=page)
-            
-            self.logger.info(f"Fetching list page {page}/{total_pages}: {page_url}")
-            html = self.get_page_html(page_url)
-            
-            if not html:
-                self.logger.warning(f"No HTML for list page {page}, skipping.")
-                continue
-
-            current_urls = self._extract_job_urls_from_page(html)
-            
-            if not current_urls:
-                self.logger.warning(f"No listings found on page {page}")
-                continue
-
-            # Filter out URLs we've already seen
-            new_urls = current_urls - seen_urls
-            duplicate_count = len(current_urls) - len(new_urls)
-            
-            self.logger.info(f"Page {page}: Found {len(current_urls)} total URLs, {len(new_urls)} new, {duplicate_count} duplicates")
-            
-            if not new_urls and page > 1:
-                self.logger.info(f"Page {page} has no new URLs, stopping pagination")
-                break
-
-            # Add new URLs to seen set
-            seen_urls.update(new_urls)
-
-            # Process only new URLs
-            tasks = [{"url": self.base_url + href} for href in new_urls]
-            self.logger.info(f"Page {page}: Processing {len(tasks)} new listings.")
-
-            with ThreadPoolExecutor(max_workers=8) as executor:
-                future_to_task = {executor.submit(self.get_page_html, task["url"]): task for task in tasks}
-                for future in as_completed(future_to_task):
-                    task = future_to_task[future]
-                    try:
-                        detail_html = future.result()
-                        if detail_html:
-                            job = self._parse_job_detail(detail_html, task["url"])
-                            if job:
-                                all_jobs.append(job)
-                    except Exception as exc:
-                        self.logger.error(f'{task["url"]} generated an exception: {exc}')
-            
-            # A polite pause between fetching list pages
-            time.sleep(random.uniform(1, 2))
-            
-        self.logger.info(f"Scrape complete: {len(all_jobs)} total unique jobs found.")
-        return all_jobs
 
 
 def run_scraper():
