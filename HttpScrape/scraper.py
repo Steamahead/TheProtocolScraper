@@ -24,6 +24,19 @@ class TheProtocolScraper(BaseScraper):
             "https://theprotocol.it/filtry/big-data-science;"
             "sp/junior,assistant,trainee,mid;p/warszawa;wp"
         )
+        self.page_size = 50
+
+    def _get_total_pages(self, html: str) -> int:
+        """Parses the total number of job offers to determine the number of pages."""
+        soup = BeautifulSoup(html, 'html.parser')
+        # This selector finds the total number of offers on the page.
+        total_offers_text = soup.select_one('h2.results-header__title > span')
+        if total_offers_text and total_offers_text.text.isdigit():
+            total_offers = int(total_offers_text.text)
+            return math.ceil(total_offers / self.page_size)
+        # Default to 1 page if the total can't be determined.
+        self.logger.warning("Could not determine total pages, defaulting to 1.")
+        return 1
 
     def _parse_job_detail(self, html: str, job_url: str) -> Optional[JobListing]:
         try:
@@ -83,26 +96,35 @@ class TheProtocolScraper(BaseScraper):
             return None
 
     def scrape(self) -> List[JobListing]:
-        """Paginates Warsaw-only listings concurrently."""
+        """Paginates Warsaw-only listings concurrently with a known number of pages."""
         self.logger.info("Starting Warsaw-only pagination scrape with concurrency.")
         all_jobs: List[JobListing] = []
-        page = 1
-        
-        while True:
+
+        # Get the total number of pages from the first page of results.
+        first_page_html = self.get_page_html(self.search_url)
+        if not first_page_html:
+            self.logger.error("Could not fetch the first page. Aborting scrape.")
+            return []
+
+        total_pages = self._get_total_pages(first_page_html)
+        self.logger.info(f"Total pages to scrape: {total_pages}")
+
+        # Loop through the known number of pages.
+        for page in range(1, total_pages + 1):
             page_url = f"{self.search_url}?page={page}"
-            self.logger.info(f"Fetching list page {page}: {page_url}")
+            self.logger.info(f"Fetching list page {page}/{total_pages}: {page_url}")
             html = self.get_page_html(page_url)
             
             if not html:
-                self.logger.warning(f"No HTML for list page {page}, stopping.")
-                break
+                self.logger.warning(f"No HTML for list page {page}, skipping.")
+                continue
 
             soup = BeautifulSoup(html, 'html.parser')
             hrefs = {a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']}
             
             if not hrefs:
-                self.logger.info(f"No more listings found on page {page}. Ending scrape.")
-                break
+                self.logger.warning(f"No listings found on page {page}, though expected. Skipping.")
+                continue
 
             tasks = [{"url": self.base_url + href} for href in hrefs]
             self.logger.info(f"Page {page}: Found {len(tasks)} listings to process.")
@@ -119,10 +141,9 @@ class TheProtocolScraper(BaseScraper):
                                 all_jobs.append(job)
                     except Exception as exc:
                         self.logger.error(f'{task["url"]} generated an exception: {exc}')
-
-            page += 1
-            # Polite pause between list pages
-            time.sleep(random.uniform(1, 3))
+            
+            # A polite pause between fetching list pages.
+            time.sleep(random.uniform(1, 2))
             
         self.logger.info(f"Scrape complete: {len(all_jobs)} total jobs found.")
         return all_jobs
