@@ -5,6 +5,9 @@ from typing import List, Optional
 import math
 import requests
 from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+import random
 
 # --- Corrected relative imports ---
 from .models import JobListing
@@ -17,7 +20,6 @@ class TheProtocolScraper(BaseScraper):
     def __init__(self):
         super().__init__()
         self.base_url = "https://theprotocol.it"
-        # Warsaw-only filter URL
         self.search_url = (
             "https://theprotocol.it/filtry/big-data-science;"
             "sp/junior,assistant,trainee,mid;p/warszawa;wp"
@@ -41,7 +43,6 @@ class TheProtocolScraper(BaseScraper):
             exp_elem = soup.select_one('span[data-test="content-positionLevels"]')
             experience = exp_elem.get_text(separator=", ", strip=True).replace('•', ',') if exp_elem else "N/A"
             
-            # --- Improved Salary Parsing ---
             salary_elem = soup.select_one('span[data-test="text-contractSalary"]')
             salary_min, salary_max = None, None
             if salary_elem:
@@ -82,43 +83,48 @@ class TheProtocolScraper(BaseScraper):
             return None
 
     def scrape(self) -> List[JobListing]:
-        """Paginates Warsaw-only listings, stopping when a page has no results."""
-        self.logger.info("Starting Warsaw-only pagination scrape.")
+        """Paginates Warsaw-only listings concurrently."""
+        self.logger.info("Starting Warsaw-only pagination scrape with concurrency.")
         all_jobs: List[JobListing] = []
         page = 1
         
-        # --- Robust Pagination Loop ---
         while True:
             page_url = f"{self.search_url}?page={page}"
-            self.logger.info(f"Fetching page {page}: {page_url}")
+            self.logger.info(f"Fetching list page {page}: {page_url}")
             html = self.get_page_html(page_url)
             
             if not html:
-                self.logger.warning(f"No HTML for page {page}, stopping.")
+                self.logger.warning(f"No HTML for list page {page}, stopping.")
                 break
 
             soup = BeautifulSoup(html, 'html.parser')
-            hrefs = [a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']]
-            unique_hrefs = list(dict.fromkeys(hrefs))
-            count = len(unique_hrefs)
-            self.logger.info(f"Page {page}: {count} listings.")
-
-            # If a page has no listings, we're done.
-            if count == 0:
+            hrefs = {a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']}
+            
+            if not hrefs:
                 self.logger.info(f"No more listings found on page {page}. Ending scrape.")
                 break
 
-            for href in unique_hrefs:
-                job_url = self.base_url + href
-                detail_html = self.get_page_html(job_url)
-                if detail_html:
-                    job = self._parse_job_detail(detail_html, job_url)
-                    if job:
-                        all_jobs.append(job)
-            
+            tasks = [{"url": self.base_url + href} for href in hrefs]
+            self.logger.info(f"Page {page}: Found {len(tasks)} listings to process.")
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                future_to_task = {executor.submit(self.get_page_html, task["url"]): task for task in tasks}
+                for future in as_completed(future_to_task):
+                    task = future_to_task[future]
+                    try:
+                        detail_html = future.result()
+                        if detail_html:
+                            job = self._parse_job_detail(detail_html, task["url"])
+                            if job:
+                                all_jobs.append(job)
+                    except Exception as exc:
+                        self.logger.error(f'{task["url"]} generated an exception: {exc}')
+
             page += 1
+            # Polite pause between list pages
+            time.sleep(random.uniform(1, 3))
             
-        self.logger.info(f"Scrape complete: {len(all_jobs)} jobs.")
+        self.logger.info(f"Scrape complete: {len(all_jobs)} total jobs found.")
         return all_jobs
 
 
@@ -128,5 +134,5 @@ def run_scraper():
     jobs = scraper.scrape()
     for job in jobs:
         insert_job_listing(job)
-    logging.info(f"Inserted {len(jobs)} jobs.")
+    logging.info(f"Attempted to insert {len(jobs)} jobs.")
     return jobs
