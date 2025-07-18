@@ -25,18 +25,116 @@ class TheProtocolScraper(BaseScraper):
             "sp/junior,assistant,trainee,mid;p/warszawa;wp"
         )
         self.page_size = 50
+        self.max_pages = 10  # Safety limit
 
     def _get_total_pages(self, html: str) -> int:
         """Parses the total number of job offers to determine the number of pages."""
         soup = BeautifulSoup(html, 'html.parser')
-        # This selector finds the total number of offers on the page.
-        total_offers_text = soup.select_one('h2.results-header__title > span')
-        if total_offers_text and total_offers_text.text.isdigit():
-            total_offers = int(total_offers_text.text)
-            return math.ceil(total_offers / self.page_size)
-        # Default to 1 page if the total can't be determined.
-        self.logger.warning("Could not determine total pages, defaulting to 1.")
-        return 1
+        
+        # Try multiple selectors to find the total number of offers
+        selectors_to_try = [
+            'h2.results-header__title > span',
+            'h2.results-header__title span',
+            '.results-header__title > span',
+            '.results-header__title span',
+            'h2[class*="results"] span',
+            'span[class*="results"]',
+            '.results-count',
+            '[data-test*="results"]',
+            'h2 span'
+        ]
+        
+        for selector in selectors_to_try:
+            try:
+                total_offers_text = soup.select_one(selector)
+                if total_offers_text:
+                    text = total_offers_text.get_text(strip=True)
+                    self.logger.info(f"Found element with selector '{selector}': '{text}'")
+                    
+                    # Extract numbers from the text
+                    numbers = re.findall(r'\d+', text)
+                    if numbers:
+                        total_offers = int(numbers[0])
+                        if total_offers > 0:
+                            pages = math.ceil(total_offers / self.page_size)
+                            self.logger.info(f"Calculated {pages} pages from {total_offers} total offers")
+                            return min(pages, self.max_pages)
+            except Exception as e:
+                self.logger.debug(f"Selector '{selector}' failed: {e}")
+                continue
+        
+        # Try to find pagination elements
+        return self._get_pages_from_pagination(soup)
+
+    def _get_pages_from_pagination(self, soup: BeautifulSoup) -> int:
+        """Try to determine total pages from pagination elements."""
+        try:
+            # Look for pagination links
+            pagination_selectors = [
+                '.pagination a',
+                '[class*="pagination"] a',
+                '[class*="pager"] a',
+                'a[href*="page="]',
+                'nav a[href*="page="]'
+            ]
+            
+            max_page = 0
+            for selector in pagination_selectors:
+                links = soup.select(selector)
+                for link in links:
+                    href = link.get('href', '')
+                    page_match = re.search(r'page=(\d+)', href)
+                    if page_match:
+                        page_num = int(page_match.group(1))
+                        max_page = max(max_page, page_num)
+                        
+                    # Also check link text for page numbers
+                    text = link.get_text(strip=True)
+                    if text.isdigit():
+                        page_num = int(text)
+                        max_page = max(max_page, page_num)
+            
+            if max_page > 0:
+                self.logger.info(f"Found {max_page} pages from pagination elements")
+                return min(max_page, self.max_pages)
+        except Exception as e:
+            self.logger.debug(f"Pagination detection failed: {e}")
+        
+        # If we can't determine the total, try scraping a few pages
+        return self._detect_pages_by_testing()
+
+    def _detect_pages_by_testing(self) -> int:
+        """Test pages sequentially to find the actual number of pages."""
+        self.logger.info("Testing pages to find total count...")
+        
+        for page in range(1, self.max_pages + 1):
+            try:
+                test_url = f"{self.search_url}?page={page}"
+                html = self.get_page_html(test_url)
+                
+                if not html:
+                    self.logger.info(f"Page {page} returned no content, stopping at page {page-1}")
+                    return max(1, page - 1)
+                
+                soup = BeautifulSoup(html, 'html.parser')
+                hrefs = [a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']]
+                
+                if not hrefs:
+                    self.logger.info(f"Page {page} has no job listings, stopping at page {page-1}")
+                    return max(1, page - 1)
+                    
+                if len(hrefs) < self.page_size:
+                    self.logger.info(f"Page {page} has {len(hrefs)} listings (less than {self.page_size}), this is the last page")
+                    return page
+                    
+                self.logger.info(f"Page {page} has {len(hrefs)} listings, continuing...")
+                
+            except Exception as e:
+                self.logger.error(f"Error testing page {page}: {e}")
+                return max(1, page - 1)
+        
+        self.logger.warning(f"Reached maximum page limit ({self.max_pages})")
+        return self.max_pages
 
     def _parse_job_detail(self, html: str, job_url: str) -> Optional[JobListing]:
         try:
@@ -96,7 +194,7 @@ class TheProtocolScraper(BaseScraper):
             return None
 
     def scrape(self) -> List[JobListing]:
-        """Paginates Warsaw-only listings concurrently with a known number of pages."""
+        """Paginates Warsaw-only listings concurrently with improved page detection."""
         self.logger.info("Starting Warsaw-only pagination scrape with concurrency.")
         all_jobs: List[JobListing] = []
 
@@ -105,6 +203,13 @@ class TheProtocolScraper(BaseScraper):
         if not first_page_html:
             self.logger.error("Could not fetch the first page. Aborting scrape.")
             return []
+
+        # Debug: log a snippet of the HTML to understand the structure
+        self.logger.info(f"First page HTML length: {len(first_page_html)}")
+        soup_debug = BeautifulSoup(first_page_html, 'html.parser')
+        h2_elements = soup_debug.find_all('h2')
+        for i, h2 in enumerate(h2_elements[:5]):  # Log first 5 h2 elements
+            self.logger.info(f"H2 element {i}: {h2.get_text(strip=True)[:100]}")
 
         total_pages = self._get_total_pages(first_page_html)
         self.logger.info(f"Total pages to scrape: {total_pages}")
@@ -123,7 +228,9 @@ class TheProtocolScraper(BaseScraper):
             hrefs = {a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']}
             
             if not hrefs:
-                self.logger.warning(f"No listings found on page {page}, though expected. Skipping.")
+                self.logger.warning(f"No listings found on page {page}. This might be the end.")
+                if page > 1:  # If it's not the first page, we can break
+                    break
                 continue
 
             tasks = [{"url": self.base_url + href} for href in hrefs]
