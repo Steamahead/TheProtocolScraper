@@ -22,17 +22,6 @@ class TheProtocolScraper(BaseScraper):
             "https://theprotocol.it/filtry/big-data-science;"
             "sp/junior,assistant,trainee,mid;p/warszawa;wp"
         )
-        self.page_size = 50  # listings per page
-
-    def _get_total_pages(self, html: str) -> int:
-        """Parses the total number of job offers to determine the number of pages."""
-        soup = BeautifulSoup(html, 'html.parser')
-        # This selector might need to be adjusted if the website structure changes.
-        total_offers_text = soup.select_one('h2.results-header__title > span')
-        if total_offers_text and total_offers_text.text.isdigit():
-            total_offers = int(total_offers_text.text)
-            return math.ceil(total_offers / self.page_size)
-        return 1 # Default to 1 page if the total can't be determined
 
     def _parse_job_detail(self, html: str, job_url: str) -> Optional[JobListing]:
         try:
@@ -51,14 +40,19 @@ class TheProtocolScraper(BaseScraper):
             work_type = m.group(1) if m else contract_text or "N/A"
             exp_elem = soup.select_one('span[data-test="content-positionLevels"]')
             experience = exp_elem.get_text(separator=", ", strip=True).replace('•', ',') if exp_elem else "N/A"
+            
+            # --- Improved Salary Parsing ---
             salary_elem = soup.select_one('span[data-test="text-contractSalary"]')
-            nums = re.findall(r"\d+", salary_elem.get_text().replace(" ", "")) if salary_elem else []
-            if len(nums) >= 2:
-                salary_min, salary_max = int(nums[0]), int(nums[1])
-            elif nums:
-                salary_min, salary_max = int(nums[0]), None
-            else:
-                salary_min = salary_max = None
+            salary_min, salary_max = None, None
+            if salary_elem:
+                salary_text = salary_elem.get_text().replace(" ", "") # Remove spaces from numbers
+                nums = re.findall(r"\d+", salary_text)
+                if len(nums) >= 2:
+                    salary_min, salary_max = int(nums[0]), int(nums[1])
+                elif nums:
+                    salary_min = int(nums[0])
+                    salary_max = salary_min
+
             id_elem = soup.select_one('span[data-test="text-offerId"]')
             if id_elem and id_elem.get_text(strip=True).isdigit():
                 job_id = id_elem.get_text(strip=True)
@@ -88,35 +82,30 @@ class TheProtocolScraper(BaseScraper):
             return None
 
     def scrape(self) -> List[JobListing]:
-        """Paginates Warsaw-only listings, stopping when the last page is reached."""
+        """Paginates Warsaw-only listings, stopping when a page has no results."""
         self.logger.info("Starting Warsaw-only pagination scrape.")
         all_jobs: List[JobListing] = []
-
-        # First, get the total number of pages
-        first_page_html = self.get_page_html(self.search_url)
-        if not first_page_html:
-            self.logger.error("Could not fetch the first page. Aborting scrape.")
-            return []
+        page = 1
         
-        total_pages = self._get_total_pages(first_page_html)
-        self.logger.info(f"Total pages to scrape: {total_pages}")
-
-        for page in range(1, total_pages + 1):
+        # --- Robust Pagination Loop ---
+        while True:
             page_url = f"{self.search_url}?page={page}"
-            self.logger.info(f"Fetching page {page}/{total_pages}: {page_url}")
+            self.logger.info(f"Fetching page {page}: {page_url}")
             html = self.get_page_html(page_url)
+            
             if not html:
                 self.logger.warning(f"No HTML for page {page}, stopping.")
                 break
 
             soup = BeautifulSoup(html, 'html.parser')
-            # The selector for the links to job offers
-            hrefs = [a['href'] for a in soup.select('a[href*=",oferta,"]')]
+            hrefs = [a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']]
             unique_hrefs = list(dict.fromkeys(hrefs))
-            self.logger.info(f"Page {page}: Found {len(unique_hrefs)} unique listings.")
+            count = len(unique_hrefs)
+            self.logger.info(f"Page {page}: {count} listings.")
 
-            if not unique_hrefs:
-                self.logger.info(f"No listings found on page {page}. Ending scrape.")
+            # If a page has no listings, we're done.
+            if count == 0:
+                self.logger.info(f"No more listings found on page {page}. Ending scrape.")
                 break
 
             for href in unique_hrefs:
@@ -126,7 +115,9 @@ class TheProtocolScraper(BaseScraper):
                     job = self._parse_job_detail(detail_html, job_url)
                     if job:
                         all_jobs.append(job)
-
+            
+            page += 1
+            
         self.logger.info(f"Scrape complete: {len(all_jobs)} jobs.")
         return all_jobs
 
