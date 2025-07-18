@@ -73,20 +73,22 @@ class TheProtocolScraper(BaseScraper):
         self.logger.info("Starting Warsaw-only scrape based on total count.")
         all_jobs: List[JobListing] = []
 
-        # Fetch page 1 to get total
-        first_page_url = f"{self.search_url}?page=1"
-        html = self.get_page_html(first_page_url)
-        if not html:
-            self.logger.error("Failed to fetch first page.")
-            return all_jobs
-        # Extract total offers: 'Wyniki (143 oferty)'
-        total_match = re.search(r"Wyniki \((\d+)", html)
-        total = int(total_match.group(1)) if total_match else None
+        # Parse total from the page header “Wyniki (N oferty)”
+        soup_first = BeautifulSoup(html, 'html.parser')
+        text_node = soup_first.find(string=re.compile(r"Wyniki \(\d+"))
+        if text_node:
+            total = int(re.search(r"(\d+)", text_node).group(1))
+            self.logger.info(f"Total offers parsed from page text: {total}")
+        else:
+            self.logger.warning("Could not find total via DOM; falling back to regex.")
+            match = re.search(r"Wyniki \((\d+)\)", html)
+            total = int(match.group(1)) if match else None
+        
         if total:
             pages = math.ceil(total / self.page_size)
             self.logger.info(f"Total offers: {total}, pages: {pages}")
         else:
-            self.logger.warning("Could not parse total; defaulting to single page.")
+            self.logger.warning("Could not determine total; defaulting to single page.")
             pages = 1
 
         # Iterate pages
