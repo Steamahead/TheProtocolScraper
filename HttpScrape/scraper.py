@@ -21,9 +21,10 @@ class TheProtocolScraper(BaseScraper):
     def __init__(self):
         super().__init__()
         self.base_url = "https://theprotocol.it"
+        # Updated URL order to match the working format
         self.search_url = (
             "https://theprotocol.it/filtry/big-data-science;"
-            "sp/junior,assistant,trainee,mid;p/warszawa;wp"
+            "sp/trainee,assistant,junior,mid;p/warszawa;wp"
         )
         self.page_size = 50
         self.max_pages = 10  # Safety limit
@@ -89,35 +90,62 @@ class TheProtocolScraper(BaseScraper):
         url_samples = list(urls)[:3]
         self.logger.info(f"Page {page_num} sample URLs: {url_samples}")
 
+    def _detect_working_pagination_format(self) -> tuple[str, int]:
+        """Find the correct pagination format and number of pages."""
+        self.logger.info("Testing correct pagination format...")
+        
+        # Get first page and extract info
+        first_page_html = self.get_page_html(self.search_url)
+        if not first_page_html:
+            return "", 0
+        
+        first_page_urls = self._extract_job_urls_from_page(first_page_html)
+        expected_pages = self._extract_pagination_from_json(first_page_html)
+        
+        self.logger.info(f"First page has {len(first_page_urls)} job URLs")
+        
+        # Test the correct pagination format
+        test_url = f"{self.search_url}?pageNumber=2"
+        self.logger.info(f"Testing correct pagination format: {test_url}")
+        
+        test_html = self.get_page_html(test_url)
+        if test_html:
+            test_urls = self._extract_job_urls_from_page(test_html)
+            new_urls = test_urls - first_page_urls
+            
+            self.logger.info(f"Page 2 test: Found {len(test_urls)} URLs, {len(new_urls)} new ones")
+            
+            if len(new_urls) > 0:
+                self.logger.info("SUCCESS! Found working ?pageNumber= pagination format")
+                return f"{self.search_url}?pageNumber={{page}}", expected_pages or 3
+        
+        self.logger.warning("Pagination format test failed, defaulting to single page")
+        return "", 1
+
     def scrape(self) -> List[JobListing]:
-        """Scrape job listings with improved pagination handling."""
-        self.logger.info("Starting Warsaw-only scrape with improved pagination detection.")
+        """Scrape job listings with correct pagination handling."""
+        self.logger.info("Starting Warsaw-only scrape with correct pagination format.")
         all_jobs: List[JobListing] = []
         seen_urls: Set[str] = set()
 
-        # First, get the expected page count from the first page
-        first_page_html = self.get_page_html(self.search_url)
-        if not first_page_html:
-            self.logger.error("Could not fetch the first page. Aborting scrape.")
-            return []
-
-        expected_pages = self._extract_pagination_from_json(first_page_html)
-        if not expected_pages:
-            expected_pages = 4  # Fallback based on your observation
-
+        # Detect the correct pagination format and page count
+        url_template, expected_pages = self._detect_working_pagination_format()
+        
+        self.logger.info(f"Using URL template: {url_template}")
         self.logger.info(f"Expected pages to scrape: {expected_pages}")
 
-        # Process each page, regardless of duplicate detection issues
+        # Process each page
         for page in range(1, expected_pages + 1):
             if page == 1:
                 page_url = self.search_url
             else:
-                page_url = f"{self.search_url}-page-{page}"
+                page_url = url_template.format(page=page)
             
             self.logger.info(f"Fetching list page {page}/{expected_pages}: {page_url}")
             
-            # Add some randomization to avoid being blocked
-            time.sleep(random.uniform(2, 4))
+            # Add delay between requests
+            if page > 1:
+                time.sleep(random.uniform(2, 4))
             
             html = self.get_page_html(page_url)
             
@@ -129,7 +157,6 @@ class TheProtocolScraper(BaseScraper):
             
             if not current_urls:
                 self.logger.warning(f"No listings found on page {page}")
-                # Don't break here, continue to next page
                 continue
 
             # Debug the page content
@@ -141,30 +168,26 @@ class TheProtocolScraper(BaseScraper):
             
             self.logger.info(f"Page {page}: Found {len(current_urls)} total URLs, {len(new_urls)} new, {duplicate_count} duplicates")
             
-            # Don't stop even if no new URLs - continue to check remaining pages
-            if not new_urls:
-                self.logger.warning(f"Page {page} has no new URLs, but continuing to check remaining pages...")
-                continue
-
             # Add new URLs to seen set
             seen_urls.update(new_urls)
 
             # Process only new URLs
-            tasks = [{"url": self.base_url + href} for href in new_urls]
-            self.logger.info(f"Page {page}: Processing {len(tasks)} new listings.")
+            if new_urls:
+                tasks = [{"url": self.base_url + href} for href in new_urls]
+                self.logger.info(f"Page {page}: Processing {len(tasks)} new listings.")
 
-            with ThreadPoolExecutor(max_workers=6) as executor:  # Reduced concurrency
-                future_to_task = {executor.submit(self.get_page_html, task["url"]): task for task in tasks}
-                for future in as_completed(future_to_task):
-                    task = future_to_task[future]
-                    try:
-                        detail_html = future.result()
-                        if detail_html:
-                            job = self._parse_job_detail(detail_html, task["url"])
-                            if job:
-                                all_jobs.append(job)
-                    except Exception as exc:
-                        self.logger.error(f'{task["url"]} generated an exception: {exc}')
+                with ThreadPoolExecutor(max_workers=6) as executor:
+                    future_to_task = {executor.submit(self.get_page_html, task["url"]): task for task in tasks}
+                    for future in as_completed(future_to_task):
+                        task = future_to_task[future]
+                        try:
+                            detail_html = future.result()
+                            if detail_html:
+                                job = self._parse_job_detail(detail_html, task["url"])
+                                if job:
+                                    all_jobs.append(job)
+                        except Exception as exc:
+                            self.logger.error(f'{task["url"]} generated an exception: {exc}')
             
             self.logger.info(f"Page {page} complete. Total unique jobs so far: {len(all_jobs)}")
             
