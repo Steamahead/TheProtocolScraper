@@ -20,7 +20,7 @@ class TheProtocolScraper(BaseScraper):
     def __init__(self):
         super().__init__()
         self.base_url = "https://theprotocol.it"
-        # URL for nationwide search
+        # URL for nationwide search, which is also page 1
         self.search_url = (
             "https://theprotocol.it/filtry/big-data-science;"
             "sp/trainee,assistant,junior,mid;p"
@@ -29,26 +29,27 @@ class TheProtocolScraper(BaseScraper):
 
     def _parse_years_of_experience(self, soup: BeautifulSoup) -> Optional[int]:
         """
-        Extracts the years of experience from the requirements list, 
-        handling 'X+' formats and filtering out irrelevant numbers.
+        Extracts years of experience, capping at 8 years and handling edge cases.
         """
         try:
-            # Selector for the requirement list items
             requirements = soup.select('li.lxul5ps')
             for req in requirements:
                 text = req.get_text(strip=True).lower()
-                
-                # Filter out sentences that are likely about company age, not job requirements
+
+                # Skip sentences about the company's age on the market
                 if 'rynku' in text or 'firmy' in text:
                     continue
 
-                # Updated regex to find a number (1-8), optionally followed by '+',
-                # and ensures it's not preceded by a letter (to avoid 'B2+').
-                match = re.search(r'(?<![a-z])([1-8])\+?\s*(?:lata|lat|letnie|year|years)', text)
+                # Regex to find a number (e.g., 3, 2+) followed by year-related keywords
+                match = re.search(r'(?<![a-z])(\d+)\+?\s*(?:lata|lat|letnie|year|years)', text)
                 
                 if match:
                     years = int(match.group(1))
-                    self.logger.info(f"Found years of experience: {years} from text: '{text[:50]}...'")
+                    # If the number is greater than 8, ignore it as requested.
+                    if years > 8:
+                        continue
+                    
+                    self.logger.info(f"Found valid years of experience: {years}")
                     return years
         except Exception as e:
             self.logger.error(f"Error parsing years of experience: {e}", exc_info=True)
@@ -91,7 +92,6 @@ class TheProtocolScraper(BaseScraper):
                 uuid_m = re.search(r',oferta,([a-zA-Z0-9\-]+)', job_url)
                 job_id = uuid_m.group(1) if uuid_m else job_url
             
-            # Extract years of experience with the new logic
             years_exp = self._parse_years_of_experience(soup)
 
             return JobListing(
@@ -119,10 +119,14 @@ class TheProtocolScraper(BaseScraper):
         """Scrapes job listings from all of Poland for a fixed number of pages."""
         self.logger.info(f"Starting nationwide scrape for {self.num_pages_to_scrape} pages.")
         all_jobs: List[JobListing] = []
-        all_urls: Set[str] = set()
+        seen_urls: Set[str] = set()
 
         for page in range(1, self.num_pages_to_scrape + 1):
-            page_url = f"{self.search_url}?pageNumber={page}" if page > 1 else self.search_url
+            # Page 1 has a different URL structure
+            if page == 1:
+                page_url = self.search_url
+            else:
+                page_url = f"{self.search_url}?pageNumber={page}"
             
             self.logger.info(f"Fetching list page {page}/{self.num_pages_to_scrape}: {page_url}")
             html = self.get_page_html(page_url)
@@ -132,29 +136,34 @@ class TheProtocolScraper(BaseScraper):
                 continue
 
             soup = BeautifulSoup(html, 'html.parser')
-            hrefs = {a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']}
-            all_urls.update(hrefs)
+            current_urls = {a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']}
+            
+            new_urls = current_urls - seen_urls
+            self.logger.info(f"Page {page}: Found {len(new_urls)} new listings.")
+            
+            if not new_urls:
+                continue
+
+            seen_urls.update(new_urls)
+            tasks = [{"url": self.base_url + href} for href in new_urls]
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                future_to_task = {executor.submit(self.get_page_html, task["url"]): task for task in tasks}
+                for future in as_completed(future_to_task):
+                    task = future_to_task[future]
+                    try:
+                        detail_html = future.result()
+                        if detail_html:
+                            job = self._parse_job_detail(detail_html, task["url"])
+                            if job:
+                                all_jobs.append(job)
+                    except Exception as exc:
+                        self.logger.error(f'{task["url"]} generated an exception: {exc}')
             
             if page < self.num_pages_to_scrape:
                 time.sleep(random.uniform(1, 2))
-
-        self.logger.info(f"Found a total of {len(all_urls)} unique job URLs to process.")
-        tasks = [{"url": self.base_url + href} for href in all_urls]
-
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            future_to_task = {executor.submit(self.get_page_html, task["url"]): task for task in tasks}
-            for future in as_completed(future_to_task):
-                task = future_to_task[future]
-                try:
-                    detail_html = future.result()
-                    if detail_html:
-                        job = self._parse_job_detail(detail_html, task["url"])
-                        if job:
-                            all_jobs.append(job)
-                except Exception as exc:
-                    self.logger.error(f'{task["url"]} generated an exception: {exc}')
                     
-        self.logger.info(f"Scrape complete: {len(all_jobs)} total jobs found.")
+        self.logger.info(f"Scrape complete: {len(all_jobs)} total unique jobs found.")
         return all_jobs
 
 def run_scraper():
