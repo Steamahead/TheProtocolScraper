@@ -8,7 +8,6 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import random
-import json
 
 # --- Corrected relative imports ---
 from .models import JobListing
@@ -16,187 +15,38 @@ from .database import insert_job_listing
 from .base_scraper import BaseScraper
 
 class TheProtocolScraper(BaseScraper):
-    """Scraper for theprotocol.it job board with dynamic Warsaw-only pagination."""
+    """Scraper for theprotocol.it job board for all of Poland."""
 
     def __init__(self):
         super().__init__()
         self.base_url = "https://theprotocol.it"
-        # Updated URL order to match the working format
+        # Updated URL for nationwide search
         self.search_url = (
             "https://theprotocol.it/filtry/big-data-science;"
-            "sp/trainee,assistant,junior,mid;p/warszawa;wp"
+            "sp/trainee,assistant,junior,mid;p"
         )
-        self.page_size = 50
-        self.max_pages = 10  # Safety limit
+        # As requested, we will scrape 6 pages.
+        self.num_pages_to_scrape = 6
 
-    def _extract_pagination_from_json(self, html: str) -> Optional[int]:
-        """Extract pagination info from the JSON data in the page."""
+    def _parse_years_of_experience(self, soup: BeautifulSoup) -> Optional[int]:
+        """Extracts the years of experience from the requirements list."""
         try:
-            # Look for the JSON data that contains pagination info
-            pattern = r'"page":\s*\{\s*"number":\s*\d+,\s*"size":\s*\d+,\s*"count":\s*(\d+)\s*\}'
-            match = re.search(pattern, html)
-            if match:
-                page_count = int(match.group(1))
-                self.logger.info(f"Found page count from JSON: {page_count}")
-                return page_count
-            
-            # Alternative pattern for total offers
-            pattern2 = r'"offersCount":\s*(\d+)'
-            match2 = re.search(pattern2, html)
-            if match2:
-                total_offers = int(match2.group(1))
-                page_count = math.ceil(total_offers / self.page_size)
-                self.logger.info(f"Found total offers: {total_offers}, calculated pages: {page_count}")
-                return page_count
-                
+            # The selector for the requirement list items
+            requirements = soup.select('li.lxul5ps')
+            for req in requirements:
+                text = req.get_text(strip=True).lower()
+                # Regex to find a number followed by year-related keywords
+                match = re.search(r'(\d+)\s*(?:lata|lat|year|years|letnie)', text)
+                if match:
+                    years = int(match.group(1))
+                    self.logger.info(f"Found years of experience: {years}")
+                    return years
         except Exception as e:
-            self.logger.debug(f"Could not extract pagination from JSON: {e}")
+            self.logger.error(f"Error parsing years of experience: {e}")
         return None
 
-    def _extract_job_urls_from_page(self, html: str) -> Set[str]:
-        """Extract unique job URLs from a page."""
-        soup = BeautifulSoup(html, 'html.parser')
-        hrefs = {a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']}
-        return hrefs
-
-    def _debug_page_content(self, page_num: int, html: str, urls: Set[str]):
-        """Debug helper to log page content details."""
-        # Extract some job titles for debugging
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        # Look for job titles in various possible selectors
-        title_selectors = [
-            'h3[data-test="text-offerTitle"]',
-            'h2[data-test="text-offerTitle"]', 
-            'a[data-test="anchor-offer-title"]',
-            '.offer-title',
-            'h3 a',
-            'h2 a'
-        ]
-        
-        titles = []
-        for selector in title_selectors:
-            elements = soup.select(selector)
-            for elem in elements[:3]:  # First 3 titles
-                title = elem.get_text(strip=True)
-                if title and len(title) > 10:  # Valid title
-                    titles.append(title[:50])  # Truncate long titles
-            if titles:
-                break
-        
-        self.logger.info(f"Page {page_num} debug - URLs: {len(urls)}, Sample titles: {titles[:3]}")
-        
-        # Log first few URL patterns for debugging
-        url_samples = list(urls)[:3]
-        self.logger.info(f"Page {page_num} sample URLs: {url_samples}")
-
-    def _detect_working_pagination_format(self) -> tuple[str, int]:
-        """Find the correct pagination format and number of pages."""
-        self.logger.info("Testing correct pagination format...")
-        
-        # Get first page and extract info
-        first_page_html = self.get_page_html(self.search_url)
-        if not first_page_html:
-            return "", 0
-        
-        first_page_urls = self._extract_job_urls_from_page(first_page_html)
-        expected_pages = self._extract_pagination_from_json(first_page_html)
-        
-        self.logger.info(f"First page has {len(first_page_urls)} job URLs")
-        
-        # Test the correct pagination format
-        test_url = f"{self.search_url}?pageNumber=2"
-        self.logger.info(f"Testing correct pagination format: {test_url}")
-        
-        test_html = self.get_page_html(test_url)
-        if test_html:
-            test_urls = self._extract_job_urls_from_page(test_html)
-            new_urls = test_urls - first_page_urls
-            
-            self.logger.info(f"Page 2 test: Found {len(test_urls)} URLs, {len(new_urls)} new ones")
-            
-            if len(new_urls) > 0:
-                self.logger.info("SUCCESS! Found working ?pageNumber= pagination format")
-                return f"{self.search_url}?pageNumber={{page}}", expected_pages or 3
-        
-        self.logger.warning("Pagination format test failed, defaulting to single page")
-        return "", 1
-
-    def scrape(self) -> List[JobListing]:
-        """Scrape job listings with correct pagination handling."""
-        self.logger.info("Starting Warsaw-only scrape with correct pagination format.")
-        all_jobs: List[JobListing] = []
-        seen_urls: Set[str] = set()
-
-        # Detect the correct pagination format and page count
-        url_template, expected_pages = self._detect_working_pagination_format()
-        
-        self.logger.info(f"Using URL template: {url_template}")
-        self.logger.info(f"Expected pages to scrape: {expected_pages}")
-
-        # Process each page
-        for page in range(1, expected_pages + 1):
-            if page == 1:
-                page_url = self.search_url
-            else:
-                page_url = url_template.format(page=page)
-            
-            self.logger.info(f"Fetching list page {page}/{expected_pages}: {page_url}")
-            
-            # Add delay between requests
-            if page > 1:
-                time.sleep(random.uniform(2, 4))
-            
-            html = self.get_page_html(page_url)
-            
-            if not html:
-                self.logger.warning(f"No HTML for list page {page}, skipping.")
-                continue
-
-            current_urls = self._extract_job_urls_from_page(html)
-            
-            if not current_urls:
-                self.logger.warning(f"No listings found on page {page}")
-                continue
-
-            # Debug the page content
-            self._debug_page_content(page, html, current_urls)
-
-            # Filter out URLs we've already seen
-            new_urls = current_urls - seen_urls
-            duplicate_count = len(current_urls) - len(new_urls)
-            
-            self.logger.info(f"Page {page}: Found {len(current_urls)} total URLs, {len(new_urls)} new, {duplicate_count} duplicates")
-            
-            # Add new URLs to seen set
-            seen_urls.update(new_urls)
-
-            # Process only new URLs
-            if new_urls:
-                tasks = [{"url": self.base_url + href} for href in new_urls]
-                self.logger.info(f"Page {page}: Processing {len(tasks)} new listings.")
-
-                with ThreadPoolExecutor(max_workers=6) as executor:
-                    future_to_task = {executor.submit(self.get_page_html, task["url"]): task for task in tasks}
-                    for future in as_completed(future_to_task):
-                        task = future_to_task[future]
-                        try:
-                            detail_html = future.result()
-                            if detail_html:
-                                job = self._parse_job_detail(detail_html, task["url"])
-                                if job:
-                                    all_jobs.append(job)
-                        except Exception as exc:
-                            self.logger.error(f'{task["url"]} generated an exception: {exc}')
-            
-            self.logger.info(f"Page {page} complete. Total unique jobs so far: {len(all_jobs)}")
-            
-        self.logger.info(f"Scrape complete: {len(all_jobs)} total unique jobs found across {expected_pages} pages.")
-        self.logger.info(f"Total unique URLs collected: {len(seen_urls)}")
-        
-        return all_jobs
-
     def _parse_job_detail(self, html: str, job_url: str) -> Optional[JobListing]:
+        """Parses the job detail page to extract all relevant information."""
         try:
             soup = BeautifulSoup(html, 'html.parser')
             title_elem = soup.select_one('h1[data-test="text-offerTitle"]')
@@ -217,7 +67,7 @@ class TheProtocolScraper(BaseScraper):
             salary_elem = soup.select_one('span[data-test="text-contractSalary"]')
             salary_min, salary_max = None, None
             if salary_elem:
-                salary_text = salary_elem.get_text().replace(" ", "") # Remove spaces from numbers
+                salary_text = salary_elem.get_text().replace(" ", "")
                 nums = re.findall(r"\d+", salary_text)
                 if len(nums) >= 2:
                     salary_min, salary_max = int(nums[0]), int(nums[1])
@@ -231,6 +81,9 @@ class TheProtocolScraper(BaseScraper):
             else:
                 uuid_m = re.search(r',oferta,([a-zA-Z0-9\-]+)', job_url)
                 job_id = uuid_m.group(1) if uuid_m else job_url
+            
+            # Extract years of experience
+            years_exp = self._parse_years_of_experience(soup)
 
             return JobListing(
                 job_id=job_id,
@@ -245,7 +98,7 @@ class TheProtocolScraper(BaseScraper):
                 work_type=work_type,
                 experience_level=experience,
                 employment_type=work_type,
-                years_of_experience=None,
+                years_of_experience=years_exp,
                 scrape_date=datetime.utcnow(),
                 listing_status='Active'
             )
@@ -253,8 +106,57 @@ class TheProtocolScraper(BaseScraper):
             self.logger.error(f"Error parsing detail {job_url}: {e}", exc_info=True)
             return None
 
+    def scrape(self) -> List[JobListing]:
+        """Scrapes job listings from all of Poland for a fixed number of pages."""
+        self.logger.info(f"Starting nationwide scrape for {self.num_pages_to_scrape} pages.")
+        all_jobs: List[JobListing] = []
+        all_urls: Set[str] = set()
+
+        # Loop through the 6 pages as requested
+        for page in range(1, self.num_pages_to_scrape + 1):
+            # The first page doesn't need a page number parameter
+            if page == 1:
+                page_url = self.search_url
+            else:
+                page_url = f"{self.search_url}?pageNumber={page}"
+            
+            self.logger.info(f"Fetching list page {page}/{self.num_pages_to_scrape}: {page_url}")
+            html = self.get_page_html(page_url)
+            
+            if not html:
+                self.logger.warning(f"No HTML for list page {page}, skipping.")
+                continue
+
+            soup = BeautifulSoup(html, 'html.parser')
+            hrefs = {a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']}
+            all_urls.update(hrefs)
+            
+            # A polite pause between fetching list pages
+            if page < self.num_pages_to_scrape:
+                time.sleep(random.uniform(1, 2))
+
+        # Now process all unique URLs found across all pages
+        self.logger.info(f"Found a total of {len(all_urls)} unique job URLs to process.")
+        tasks = [{"url": self.base_url + href} for href in all_urls]
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            future_to_task = {executor.submit(self.get_page_html, task["url"]): task for task in tasks}
+            for future in as_completed(future_to_task):
+                task = future_to_task[future]
+                try:
+                    detail_html = future.result()
+                    if detail_html:
+                        job = self._parse_job_detail(detail_html, task["url"])
+                        if job:
+                            all_jobs.append(job)
+                except Exception as exc:
+                    self.logger.error(f'{task["url"]} generated an exception: {exc}')
+                    
+        self.logger.info(f"Scrape complete: {len(all_jobs)} total jobs found.")
+        return all_jobs
 
 def run_scraper():
+    """Entry point for the Azure Function to run the scraper."""
     logging.info("Scraper started.")
     scraper = TheProtocolScraper()
     jobs = scraper.scrape()
