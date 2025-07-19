@@ -20,29 +20,38 @@ class TheProtocolScraper(BaseScraper):
     def __init__(self):
         super().__init__()
         self.base_url = "https://theprotocol.it"
-        # Updated URL for nationwide search
+        # URL for nationwide search
         self.search_url = (
             "https://theprotocol.it/filtry/big-data-science;"
             "sp/trainee,assistant,junior,mid;p"
         )
-        # As requested, we will scrape 6 pages.
         self.num_pages_to_scrape = 6
 
     def _parse_years_of_experience(self, soup: BeautifulSoup) -> Optional[int]:
-        """Extracts the years of experience from the requirements list."""
+        """
+        Extracts the years of experience from the requirements list, 
+        handling 'X+' formats and filtering out irrelevant numbers.
+        """
         try:
-            # The selector for the requirement list items
+            # Selector for the requirement list items
             requirements = soup.select('li.lxul5ps')
             for req in requirements:
                 text = req.get_text(strip=True).lower()
-                # Regex to find a number followed by year-related keywords
-                match = re.search(r'(\d+)\s*(?:lata|lat|year|years|letnie)', text)
+                
+                # Filter out sentences that are likely about company age, not job requirements
+                if 'rynku' in text or 'firmy' in text:
+                    continue
+
+                # Updated regex to find a number (1-8), optionally followed by '+',
+                # and ensures it's not preceded by a letter (to avoid 'B2+').
+                match = re.search(r'(?<![a-z])([1-8])\+?\s*(?:lata|lat|letnie|year|years)', text)
+                
                 if match:
                     years = int(match.group(1))
-                    self.logger.info(f"Found years of experience: {years}")
+                    self.logger.info(f"Found years of experience: {years} from text: '{text[:50]}...'")
                     return years
         except Exception as e:
-            self.logger.error(f"Error parsing years of experience: {e}")
+            self.logger.error(f"Error parsing years of experience: {e}", exc_info=True)
         return None
 
     def _parse_job_detail(self, html: str, job_url: str) -> Optional[JobListing]:
@@ -82,7 +91,7 @@ class TheProtocolScraper(BaseScraper):
                 uuid_m = re.search(r',oferta,([a-zA-Z0-9\-]+)', job_url)
                 job_id = uuid_m.group(1) if uuid_m else job_url
             
-            # Extract years of experience
+            # Extract years of experience with the new logic
             years_exp = self._parse_years_of_experience(soup)
 
             return JobListing(
@@ -112,13 +121,8 @@ class TheProtocolScraper(BaseScraper):
         all_jobs: List[JobListing] = []
         all_urls: Set[str] = set()
 
-        # Loop through the 6 pages as requested
         for page in range(1, self.num_pages_to_scrape + 1):
-            # The first page doesn't need a page number parameter
-            if page == 1:
-                page_url = self.search_url
-            else:
-                page_url = f"{self.search_url}?pageNumber={page}"
+            page_url = f"{self.search_url}?pageNumber={page}" if page > 1 else self.search_url
             
             self.logger.info(f"Fetching list page {page}/{self.num_pages_to_scrape}: {page_url}")
             html = self.get_page_html(page_url)
@@ -131,11 +135,9 @@ class TheProtocolScraper(BaseScraper):
             hrefs = {a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']}
             all_urls.update(hrefs)
             
-            # A polite pause between fetching list pages
             if page < self.num_pages_to_scrape:
                 time.sleep(random.uniform(1, 2))
 
-        # Now process all unique URLs found across all pages
         self.logger.info(f"Found a total of {len(all_urls)} unique job URLs to process.")
         tasks = [{"url": self.base_url + href} for href in all_urls]
 
