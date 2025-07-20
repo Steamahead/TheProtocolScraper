@@ -1,5 +1,5 @@
 import pymssql
-from typing import Optional
+from typing import Optional, List
 import os
 import logging
 from datetime import datetime
@@ -47,6 +47,23 @@ def create_tables_if_not_exist():
             END
             """
             cursor.execute(jobs_table_sql)
+            
+            # --- Added Skills Table ---
+            skills_table_sql = """
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Skills')
+            BEGIN
+                CREATE TABLE Skills (
+                    ID INT IDENTITY(1,1) PRIMARY KEY,
+                    JobID NVARCHAR(100) NOT NULL,
+                    ShortID INT NOT NULL,
+                    Source NVARCHAR(50) NOT NULL,
+                    SkillName NVARCHAR(150) NOT NULL,
+                    SkillCategory NVARCHAR(50) NULL,
+                    CONSTRAINT UC_JobSkill UNIQUE (JobID, Source, SkillName)
+                )
+            END
+            """
+            cursor.execute(skills_table_sql)
             connection.commit()
     logging.info("Database tables created or already exist")
 
@@ -56,9 +73,11 @@ def insert_job_listing(job: JobListing) -> Optional[int]:
         with get_sql_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT ID FROM JobListings WHERE JobID=%s AND Source=%s", (job.job_id, job.source))
-                if cursor.fetchone():
-                    logging.info(f"Job already exists: {job.job_id}")
-                    return None
+                row = cursor.fetchone()
+                if row:
+                    logging.info(f"Job already exists with ID: {row[0]}")
+                    job.short_id = row[0] # Assign existing ID
+                    return row[0]
                 
                 insert_sql = """
                 INSERT INTO JobListings (
@@ -78,7 +97,43 @@ def insert_job_listing(job: JobListing) -> Optional[int]:
                 new_id = cursor.fetchone()[0]
                 connection.commit()
                 logging.info(f"Inserted new job with ID: {new_id}")
+                job.short_id = new_id # Assign new ID
                 return new_id
     except Exception as e:
         logging.error(f"Error inserting job listing '{job.title}': {e}", exc_info=True)
         return None
+
+def insert_skill(skill: Skill) -> bool:
+    """Insert a skill into the database"""
+    try:
+        with get_sql_connection() as connection:
+            with connection.cursor() as cursor:
+                # Check if skill already exists for this job
+                check_query = """
+                SELECT ID FROM Skills
+                WHERE JobID = %s AND Source = %s AND SkillName = %s
+                """
+                cursor.execute(check_query, (skill.job_id, skill.source, skill.skill_name))
+                if cursor.fetchone():
+                    logging.info(f"Skill '{skill.skill_name}' already exists for job {skill.job_id}")
+                    return True # Skill already exists, no need to insert
+                
+                # Insert new skill
+                insert_query = """
+                INSERT INTO Skills (JobID, ShortID, Source, SkillName, SkillCategory)
+                VALUES (%s, %s, %s, %s, %s)
+                """
+                params = (
+                    _truncate(skill.job_id, 100),
+                    skill.short_id,
+                    _truncate(skill.source, 50),
+                    _truncate(skill.skill_name, 150),
+                    _truncate(skill.skill_category, 50)
+                )
+                cursor.execute(insert_query, params)
+                connection.commit()
+                logging.info(f"Inserted skill: {skill.skill_name} for job {skill.job_id}")
+                return True
+    except Exception as e:
+        logging.error(f"Error inserting skill '{skill.skill_name}' for job '{skill.job_id}': {e}", exc_info=True)
+        return False
