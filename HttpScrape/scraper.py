@@ -36,16 +36,13 @@ class TheProtocolScraper(BaseScraper):
             for req in requirements:
                 text = req.get_text(strip=True).lower()
 
-                # Skip sentences about the company's age on the market
                 if 'rynku' in text or 'firmy' in text:
                     continue
 
-                # Regex to find a number (e.g., 3, 2+) followed by year-related keywords
                 match = re.search(r'(?<![a-z])(\d+)\+?\s*(?:lata|lat|letnie|year|years)', text)
                 
                 if match:
                     years = int(match.group(1))
-                    # If the number is greater than 8, ignore it as requested.
                     if years > 8:
                         continue
                     
@@ -74,11 +71,14 @@ class TheProtocolScraper(BaseScraper):
             exp_elem = soup.select_one('span[data-test="content-positionLevels"]')
             experience = exp_elem.get_text(separator=", ", strip=True).replace('•', ',') if exp_elem else "N/A"
             
+            # --- Corrected Salary Parsing ---
             salary_elem = soup.select_one('span[data-test="text-contractSalary"]')
             salary_min, salary_max = None, None
             if salary_elem:
-                salary_text = salary_elem.get_text().replace(" ", "")
-                nums = re.findall(r"\d+", salary_text)
+                # Get text and clean it by removing non-breaking spaces ('&nbsp;') and regular spaces.
+                salary_text = salary_elem.get_text().replace('\xa0', '').replace(' ', '')
+                # Find all sequences of digits.
+                nums = re.findall(r'\d+', salary_text)
                 if len(nums) >= 2:
                     salary_min, salary_max = int(nums[0]), int(nums[1])
                 elif nums:
@@ -122,7 +122,6 @@ class TheProtocolScraper(BaseScraper):
         seen_urls: Set[str] = set()
 
         for page in range(1, self.num_pages_to_scrape + 1):
-            # Page 1 has a different URL structure
             if page == 1:
                 page_url = self.search_url
             else:
