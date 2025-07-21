@@ -11,7 +11,7 @@ import random
 
 # --- Corrected relative imports ---
 from .models import JobListing, Skill
-from .database import insert_job_listing, insert_skill
+from .database import insert_job_listing, insert_skill, get_sql_connection
 from .base_scraper import BaseScraper
 
 class TheProtocolScraper(BaseScraper):
@@ -26,7 +26,7 @@ class TheProtocolScraper(BaseScraper):
         )
         self.num_pages_to_scrape = 6
         
-        # --- Final Skill Categories (No "Others" category) ---
+        # --- Skill Categories ---
         self.skill_categories = {
             "Database": ["sql", "mysql", "postgresql", "oracle", "nosql", "mongodb", "database", "ms access", "sqlite", "redshift", "snowflake", "microsoft sql server", "teradata", "clickhouse", "azure sql database", "azure sql managed instance", "mariadb", "ms sql", "sql i pl/sql", "oracle forms", "oracle apex", "oracle ebs", "oracle application framework (oaf)", "oracle erp cloud", "sql server", "mssqlserver", "azure sql", "pl/pgsql", "aas", "neteza", "singlestore", "oracle fusion middleware", "oracle jdeveloper"],
             "Microsoft BI & Excel": ["excel", "power query", "power pivot", "vba", "macros", "pivot tables", "excel formulas", "spreadsheets", "m code", "ssrs", "ssis", "ssas", "power apps", "power automate", "powerpoint", "office 365", "microsoft power bi", "power bi", "power bi.", "ms office", "ms excel", "microsoft dynamics 365", "ms fabric"],
@@ -54,16 +54,11 @@ class TheProtocolScraper(BaseScraper):
             skill_name = elem.get('title', '').strip()
             if not skill_name:
                 continue
-
             normalized_skill = skill_name.lower()
-            
-            # Find the correct category for the skill
             for cat, skills_in_cat in self.skill_categories.items():
                 if normalized_skill in skills_in_cat:
-                    # If a category is found, add the skill and move to the next element
                     found_skills.append((skill_name, cat))
                     break
-        
         return found_skills
 
     def _parse_years_of_experience(self, soup: BeautifulSoup) -> Optional[int]:
@@ -80,28 +75,22 @@ class TheProtocolScraper(BaseScraper):
                     if years > 8:
                         continue
                     return years
-        except Exception as e:
-            self.logger.error(f"Error parsing years of experience: {e}", exc_info=True)
+        except Exception:
+            return None
         return None
 
     def _parse_job_detail(self, html: str, job_url: str) -> Optional[Tuple[JobListing, List[Tuple[str, str]]]]:
         """Parses job details and skills, returning them as a tuple."""
         try:
             soup = BeautifulSoup(html, 'html.parser')
-            title_elem = soup.select_one('h1[data-test="text-offerTitle"]')
-            title = title_elem.get_text(strip=True) if title_elem else "N/A"
-            company_elem = soup.select_one('a[data-test="anchor-company-link"]')
-            company = company_elem.get_text(strip=True).split(':')[-1].strip() if company_elem else "N/A"
-            mode_elem = soup.select_one('span[data-test="content-workModes"]')
-            operating_mode = mode_elem.get_text(strip=True) if mode_elem else "N/A"
-            loc_elem = soup.select_one('span[data-test="text-primaryLocation"]')
-            location = loc_elem.get_text(strip=True) if loc_elem else "N/A"
-            contract_elem = soup.select_one('span[data-test="text-contractName"]')
-            contract_text = contract_elem.get_text(strip=True) if contract_elem else ""
+            title = soup.select_one('h1[data-test="text-offerTitle"]').get_text(strip=True)
+            company = soup.select_one('a[data-test="anchor-company-link"]').get_text(strip=True).split(':')[-1].strip()
+            operating_mode = soup.select_one('span[data-test="content-workModes"]').get_text(strip=True)
+            location = soup.select_one('span[data-test="text-primaryLocation"]').get_text(strip=True)
+            contract_text = soup.select_one('span[data-test="text-contractName"]').get_text(strip=True)
             m = re.search(r"\(([^)]+)\)", contract_text)
             work_type = m.group(1) if m else contract_text or "N/A"
-            exp_elem = soup.select_one('span[data-test="content-positionLevels"]')
-            experience = exp_elem.get_text(separator=", ", strip=True).replace('•', ',') if exp_elem else "N/A"
+            experience = soup.select_one('span[data-test="content-positionLevels"]').get_text(separator=", ", strip=True).replace('•', ',')
             
             salary_elem = soup.select_one('span[data-test="text-contractSalary"]')
             salary_min, salary_max = None, None
@@ -127,19 +116,14 @@ class TheProtocolScraper(BaseScraper):
             skills_data = self._parse_skills(soup)
 
             job_listing = JobListing(
-                job_id=job_id,
-                source='theprotocol.it',
-                title=title, company=company, link=job_url,
-                operating_mode=operating_mode, salary_min=salary_min, salary_max=salary_max,
-                location=location, work_type=work_type, experience_level=experience,
-                employment_type=work_type, years_of_experience=years_exp,
-                scrape_date=datetime.utcnow(), listing_status='Active'
+                job_id=job_id, source='theprotocol.it', title=title, company=company, link=job_url,
+                operating_mode=operating_mode, salary_min=salary_min, salary_max=salary_max, location=location,
+                work_type=work_type, experience_level=experience, employment_type=work_type,
+                years_of_experience=years_exp, scrape_date=datetime.utcnow(), listing_status='Active'
             )
-            
             return job_listing, skills_data
-
         except Exception as e:
-            self.logger.error(f"Error parsing detail {job_url}: {e}", exc_info=True)
+            self.logger.error(f"Error parsing detail {job_url}: {e}", exc_info=False) # Quieter logging for parsing errors
             return None
 
     def scrape(self) -> List[Tuple[JobListing, List[Tuple[str, str]]]]:
@@ -153,22 +137,17 @@ class TheProtocolScraper(BaseScraper):
             self.logger.info(f"Fetching list page {page}/{self.num_pages_to_scrape}: {page_url}")
             
             html = self.get_page_html(page_url)
-            if not html:
-                self.logger.warning(f"No HTML for list page {page}, skipping.")
-                continue
-
-            soup = BeautifulSoup(html, 'html.parser')
-            current_urls = {a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']}
-            new_urls = current_urls - seen_urls
+            if not html: continue
             
-            if not new_urls:
-                self.logger.info(f"Page {page}: No new listings found.")
-                continue
+            soup = BeautifulSoup(html, 'html.parser')
+            new_urls = {a['href'] for a in soup.find_all('a', href=True) if ',oferta,' in a['href']} - seen_urls
+            if not new_urls: continue
 
             seen_urls.update(new_urls)
             tasks = [{"url": self.base_url + href} for href in new_urls]
 
-            with ThreadPoolExecutor(max_workers=8) as executor:
+            # Increased worker count for potentially faster scraping
+            with ThreadPoolExecutor(max_workers=12) as executor:
                 future_to_task = {executor.submit(self.get_page_html, task["url"]): task for task in tasks}
                 for future in as_completed(future_to_task):
                     task = future_to_task[future]
@@ -179,7 +158,7 @@ class TheProtocolScraper(BaseScraper):
                             if result:
                                 all_results.append(result)
                     except Exception as exc:
-                        self.logger.error(f'{task["url"]} generated an exception: {exc}')
+                        self.logger.error(f'Fetching detail page {task["url"]} generated an exception: {exc}')
             
             if page < self.num_pages_to_scrape:
                 time.sleep(random.uniform(1, 2))
@@ -188,29 +167,50 @@ class TheProtocolScraper(BaseScraper):
         return all_results
 
 def run_scraper():
-    """Entry point for the Azure Function to run the scraper and save data."""
+    """Entry point for the Azure Function to run the scraper and save data efficiently."""
     logging.info("Scraper started.")
     scraper = TheProtocolScraper()
     results = scraper.scrape()
     
     jobs_inserted = 0
     skills_inserted = 0
+    
+    connection = None
+    try:
+        # Get a single database connection to use for all inserts
+        connection = get_sql_connection()
+        logging.info("Database connection opened for batch insert.")
+        with connection.cursor() as cursor:
+            for job_listing, skills_data in results:
+                # Use the existing cursor for the job insert
+                new_job_id = insert_job_listing(job_listing, cursor)
+                
+                if new_job_id:
+                    jobs_inserted += 1
+                    for skill_name, skill_category in skills_data:
+                        skill = Skill(
+                            job_id=job_listing.job_id,
+                            short_id=new_job_id, 
+                            source='theprotocol.it',
+                            skill_name=skill_name,
+                            skill_category=skill_category
+                        )
+                        # Use the same cursor for the skill insert
+                        if insert_skill(skill, cursor):
+                            skills_inserted += 1
+            # Commit all transactions at the end
+            connection.commit()
+            logging.info("All data committed to database.")
 
-    for job_listing, skills_data in results:
-        new_job_id = insert_job_listing(job_listing)
-        
-        if new_job_id:
-            jobs_inserted += 1
-            for skill_name, skill_category in skills_data:
-                skill = Skill(
-                    job_id=job_listing.job_id,
-                    short_id=new_job_id, 
-                    source='theprotocol.it',
-                    skill_name=skill_name,
-                    skill_category=skill_category
-                )
-                if insert_skill(skill):
-                    skills_inserted += 1
+    except Exception as e:
+        logging.error(f"An error occurred during database insertion: {e}", exc_info=True)
+        if connection:
+            connection.rollback()
+            logging.warning("Database transaction was rolled back.")
+    finally:
+        if connection:
+            connection.close()
+            logging.info("Database connection closed.")
 
-    logging.info(f"Attempted to insert {len(results)} jobs. Successfully inserted: {jobs_inserted} jobs and {skills_inserted} skills.")
+    logging.info(f"Process complete. Successfully inserted: {jobs_inserted} jobs and {skills_inserted} skills.")
     return {"scraped_jobs": len(results)}
