@@ -143,7 +143,8 @@ class TheProtocolScraper(BaseScraper):
             seen_urls.update(new_urls)
             tasks = [{"url": self.base_url + href} for href in new_urls]
 
-            with ThreadPoolExecutor(max_workers=12) as executor:
+            # Reduced worker count to be less aggressive
+            with ThreadPoolExecutor(max_workers=5) as executor:
                 future_to_task = {executor.submit(self.get_page_html, task["url"]): task for task in tasks}
                 for future in as_completed(future_to_task):
                     task = future_to_task[future]
@@ -156,8 +157,9 @@ class TheProtocolScraper(BaseScraper):
                     except Exception as exc:
                         self.logger.error(f'Fetching detail page {task["url"]} generated an exception: {exc}')
             
+            # Increased delay between list pages
             if page < self.num_pages_to_scrape:
-                time.sleep(random.uniform(1, 2))
+                time.sleep(random.uniform(2, 5))
                     
         self.logger.info(f"Scraping complete: {len(all_results)} total jobs found.")
         return all_results
@@ -168,7 +170,7 @@ def run_scraper():
     
     # --- Phase 1: Scrape all data ---
     scraper = TheProtocolScraper()
-    scraped_data = scraper.scrape() # This now calls the correctly named method
+    scraped_data = scraper.scrape()
     
     if not scraped_data:
         logging.info("No data scraped. Process finished.")
