@@ -123,8 +123,8 @@ class TheProtocolScraper(BaseScraper):
             self.logger.error(f"Error parsing detail {job_url}: {e}", exc_info=False)
             return None
 
-    def scrape_all_data(self) -> List[Tuple[JobListing, List[Tuple[str, str]]]]:
-        """Scrapes all job and skill data without touching the database."""
+    def scrape(self) -> List[Tuple[JobListing, List[Tuple[str, str]]]]:
+        """Implements the abstract method. Scrapes all job and skill data."""
         self.logger.info(f"Starting nationwide scrape for {self.num_pages_to_scrape} pages.")
         all_results: List[Tuple[JobListing, List[Tuple[str, str]]]] = []
         seen_urls: Set[str] = set()
@@ -168,7 +168,7 @@ def run_scraper():
     
     # --- Phase 1: Scrape all data ---
     scraper = TheProtocolScraper()
-    scraped_data = scraper.scrape_all_data()
+    scraped_data = scraper.scrape() # This now calls the correctly named method
     
     if not scraped_data:
         logging.info("No data scraped. Process finished.")
