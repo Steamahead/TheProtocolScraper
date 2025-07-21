@@ -2,7 +2,6 @@ import logging
 import re
 from datetime import datetime
 from typing import List, Optional, Set, Tuple
-import math
 import requests
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -11,7 +10,7 @@ import random
 
 # --- Corrected relative imports ---
 from .models import JobListing, Skill
-from .database import insert_job_listing, insert_skill, get_sql_connection
+from .database import get_sql_connection, insert_job_listing, insert_skill
 from .base_scraper import BaseScraper
 
 class TheProtocolScraper(BaseScraper):
@@ -67,14 +66,12 @@ class TheProtocolScraper(BaseScraper):
             requirements = soup.select('li.lxul5ps')
             for req in requirements:
                 text = req.get_text(strip=True).lower()
-                if 'rynku' in text or 'firmy' in text:
-                    continue
+                if 'rynku' in text or 'firmy' in text: continue
                 match = re.search(r'(?<![a-z])(\d+)\+?\s*(?:lata|lat|letnie|year|years)', text)
                 if match:
                     years = int(match.group(1))
-                    if years > 8:
-                        continue
-                    return years
+                    if years <= 8:
+                        return years
         except Exception:
             return None
         return None
@@ -123,11 +120,11 @@ class TheProtocolScraper(BaseScraper):
             )
             return job_listing, skills_data
         except Exception as e:
-            self.logger.error(f"Error parsing detail {job_url}: {e}", exc_info=False) # Quieter logging for parsing errors
+            self.logger.error(f"Error parsing detail {job_url}: {e}", exc_info=False)
             return None
 
-    def scrape(self) -> List[Tuple[JobListing, List[Tuple[str, str]]]]:
-        """Scrapes job listings and their skills from all of Poland."""
+    def scrape_all_data(self) -> List[Tuple[JobListing, List[Tuple[str, str]]]]:
+        """Scrapes all job and skill data without touching the database."""
         self.logger.info(f"Starting nationwide scrape for {self.num_pages_to_scrape} pages.")
         all_results: List[Tuple[JobListing, List[Tuple[str, str]]]] = []
         seen_urls: Set[str] = set()
@@ -146,7 +143,6 @@ class TheProtocolScraper(BaseScraper):
             seen_urls.update(new_urls)
             tasks = [{"url": self.base_url + href} for href in new_urls]
 
-            # Increased worker count for potentially faster scraping
             with ThreadPoolExecutor(max_workers=12) as executor:
                 future_to_task = {executor.submit(self.get_page_html, task["url"]): task for task in tasks}
                 for future in as_completed(future_to_task):
@@ -163,26 +159,30 @@ class TheProtocolScraper(BaseScraper):
             if page < self.num_pages_to_scrape:
                 time.sleep(random.uniform(1, 2))
                     
-        self.logger.info(f"Scrape complete: {len(all_results)} total jobs found.")
+        self.logger.info(f"Scraping complete: {len(all_results)} total jobs found.")
         return all_results
 
 def run_scraper():
-    """Entry point for the Azure Function to run the scraper and save data efficiently."""
-    logging.info("Scraper started.")
-    scraper = TheProtocolScraper()
-    results = scraper.scrape()
+    """Orchestrates the scraping and database insertion."""
+    logging.info("Scraper process started.")
     
+    # --- Phase 1: Scrape all data ---
+    scraper = TheProtocolScraper()
+    scraped_data = scraper.scrape_all_data()
+    
+    if not scraped_data:
+        logging.info("No data scraped. Process finished.")
+        return
+        
+    # --- Phase 2: Insert data into database ---
     jobs_inserted = 0
     skills_inserted = 0
-    
     connection = None
     try:
-        # Get a single database connection to use for all inserts
         connection = get_sql_connection()
         logging.info("Database connection opened for batch insert.")
         with connection.cursor() as cursor:
-            for job_listing, skills_data in results:
-                # Use the existing cursor for the job insert
+            for job_listing, skills_data in scraped_data:
                 new_job_id = insert_job_listing(job_listing, cursor)
                 
                 if new_job_id:
@@ -195,13 +195,10 @@ def run_scraper():
                             skill_name=skill_name,
                             skill_category=skill_category
                         )
-                        # Use the same cursor for the skill insert
                         if insert_skill(skill, cursor):
                             skills_inserted += 1
-            # Commit all transactions at the end
             connection.commit()
             logging.info("All data committed to database.")
-
     except Exception as e:
         logging.error(f"An error occurred during database insertion: {e}", exc_info=True)
         if connection:
@@ -212,5 +209,4 @@ def run_scraper():
             connection.close()
             logging.info("Database connection closed.")
 
-    logging.info(f"Process complete. Successfully inserted: {jobs_inserted} jobs and {skills_inserted} skills.")
-    return {"scraped_jobs": len(results)}
+    logging.info(f"Process complete. Inserted: {jobs_inserted} jobs and {skills_inserted} skills.")
