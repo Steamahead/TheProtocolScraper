@@ -1,31 +1,37 @@
 import logging
-import azure.functions as func
-import json
 from datetime import datetime
+import azure.functions as func
 
-# --- CORRECTED RELATIVE IMPORTS ---
+# --- Relative imports for scraper and database functions ---
 from .scraper import run_scraper
 from .database import create_tables_if_not_exist
 
 def main(myTimer: func.TimerRequest) -> None:
     """
-    Timer-triggered function to run the scraper daily.
-    """
-    utc_timestamp = datetime.utcnow().isoformat()
-    logging.info(f'HttpScrape timer trigger function ran at: {utc_timestamp}')
+    Azure Function triggered by a timer to run the web scraper.
 
+    This function initializes the database, runs the scraper, and logs the process.
+    """
+    
+    # Log the function execution time
+    utc_timestamp = datetime.utcnow().isoformat()
+    logging.info(f"🚀 Python timer trigger function executed at: {utc_timestamp}")
+
+    # Check if the timer invocation is late
     if myTimer.past_due:
-        logging.info('The timer is past due!')
+        logging.warning("The timer is past due! This may indicate a scaling issue.")
 
     try:
-        logging.info("Ensuring database tables exist...")
+        # Step 1: Ensure database tables are created
+        logging.info("Initializing database...")
         create_tables_if_not_exist()
-        logging.info("Database tables are ready.")
+        logging.info("✅ Database is ready.")
 
-        # Run the scraper
+        # Step 2: Run the main scraper function
+        logging.info("Starting the web scraping process...")
         run_scraper()
-        
-        logging.info(f'Scraper function finished successfully at: {datetime.utcnow().isoformat()}')
+        logging.info("🎉 Scraping process completed successfully.")
 
     except Exception as e:
-        logging.error(f"An error occurred in the main timer function: {e}", exc_info=True)
+        # Log any errors that occur during the process
+        logging.error(f"An error occurred during the main execution: {e}", exc_info=True)
